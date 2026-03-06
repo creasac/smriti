@@ -1,0 +1,15 @@
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Recorder outputs (default naming from recorder.py)
+recording-*.mp4
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
