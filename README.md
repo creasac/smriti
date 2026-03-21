@@ -47,6 +47,8 @@ This installs:
 - `~/.local/share/smriti/`
 - `~/.local/share/applications/smriti.desktop`
 
+The desktop entry uses `smriti_logo.png` as its launcher icon.
+
 If `~/.local/bin` is not already on your `PATH`, the installer appends it to `~/.bashrc`.
 
 ## Recording behavior

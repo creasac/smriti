@@ -12,6 +12,7 @@ mkdir -p "${INSTALL_DIR}" "${BIN_DIR}" "${APPLICATIONS_DIR}"
 
 install -m 755 "${SCRIPT_DIR}/recorder.py" "${INSTALL_DIR}/recorder.py"
 install -m 755 "${SCRIPT_DIR}/smriti" "${INSTALL_DIR}/smriti"
+install -m 644 "${SCRIPT_DIR}/smriti_logo.png" "${INSTALL_DIR}/smriti_logo.png"
 ln -sfn "${INSTALL_DIR}/smriti" "${BIN_DIR}/smriti"
 
 cat > "${APPLICATIONS_DIR}/smriti.desktop" <<EOF
@@ -21,6 +22,8 @@ Type=Application
 Name=smriti
 Comment=Small X11 desktop recorder
 Exec=${BIN_DIR}/smriti
+Icon=${INSTALL_DIR}/smriti_logo.png
+StartupWMClass=smriti
 Terminal=false
 Categories=AudioVideo;Utility;
 StartupNotify=true

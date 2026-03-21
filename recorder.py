@@ -148,6 +148,13 @@ def quote_concat_path(path: Path) -> str:
     return str(path).replace("'", r"'\''")
 
 
+def find_app_icon_path() -> Path | None:
+    icon_path = Path(__file__).resolve().with_name("smriti_logo.png")
+    if icon_path.exists():
+        return icon_path
+    return None
+
+
 def read_pipe(pipe: object) -> str:
     if pipe is None:
         return ""
@@ -841,9 +848,11 @@ class RecorderApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        self.icon_image: tk.PhotoImage | None = None
         self.root.title("smriti")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._set_window_icon()
 
         self.expanded = True
         self.state: ControllerState | None = None
@@ -851,6 +860,16 @@ class RecorderApp:
 
         self._build_ui()
         self._poll_events()
+
+    def _set_window_icon(self) -> None:
+        icon_path = find_app_icon_path()
+        if icon_path is None:
+            return
+        try:
+            self.icon_image = tk.PhotoImage(file=str(icon_path))
+            self.root.iconphoto(True, self.icon_image)
+        except tk.TclError:
+            self.icon_image = None
 
     def _build_ui(self) -> None:
         self.root.configure(bg="#f2efe7")
@@ -1100,7 +1119,7 @@ def launch_gui() -> int:
         print("tkinter is required to run the smriti GUI.", file=os.sys.stderr)
         return 1
 
-    root = tk.Tk()
+    root = tk.Tk(className="smriti")
     app = RecorderApp(root)
     root.mainloop()
     return 0
