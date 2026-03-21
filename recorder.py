@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-"""Minimal X11 screen recorder with optional webcam and audio."""
+"""GUI-first X11 screen recorder with optional webcam preview and microphone."""
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 import os
+import queue
 import re
-import shlex
 import shutil
 import signal
 import subprocess
-import sys
+import tempfile
+import threading
 import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+try:
+    import tkinter as tk
+except ImportError:  # pragma: no cover - depends on local system packages.
+    tk = None
+
 SIZE_PATTERN = re.compile(r"^\d+x\d+$")
-REGION_PATTERN = re.compile(r"^(?P<w>\d+)x(?P<h>\d+)\+(?P<x>\d+),(?P<y>\d+)$")
 
 
 def run_capture(command: list[str]) -> str | None:
-    """Return stdout for a command, or None if unavailable/failing."""
+    """Return stdout for a command, or None if unavailable or failing."""
     if shutil.which(command[0]) is None:
         return None
     try:
@@ -37,7 +42,7 @@ def run_capture(command: list[str]) -> str | None:
 
 
 def detect_screen_size() -> str | None:
-    """Best effort screen size detection for active X11 display."""
+    """Best effort screen size detection for the active X11 display."""
     xrandr_output = run_capture(["xrandr", "--current"])
     if xrandr_output:
         for line in xrandr_output.splitlines():
@@ -53,18 +58,6 @@ def detect_screen_size() -> str | None:
             return match.group(1)
 
     return None
-
-
-def parse_region(region: str) -> tuple[str, int, int]:
-    """Parse region string WIDTHxHEIGHT+X,Y into size and offsets."""
-    match = REGION_PATTERN.match(region)
-    if not match:
-        raise ValueError("Region must match WIDTHxHEIGHT+X,Y (example: 1280x720+100,80)")
-    width = match.group("w")
-    height = match.group("h")
-    offset_x = int(match.group("x"))
-    offset_y = int(match.group("y"))
-    return f"{width}x{height}", offset_x, offset_y
 
 
 def get_pulse_sources() -> list[str]:
@@ -105,18 +98,31 @@ def pick_default_desktop_source(sources: list[str]) -> str | None:
     return None
 
 
-def list_video_devices() -> list[str]:
-    return sorted(str(path) for path in Path("/dev").glob("video*"))
-
-
 def default_output_path() -> Path:
-    timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path.cwd() / f"recording-{timestamp}.mp4"
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d-time-%H-%M-%S")
+    return Path.home() / "Videos" / "smriti" / f"recording-{timestamp}.mp4"
+
+
+def next_available_output_path() -> Path:
+    base = default_output_path()
+    if not base.exists():
+        return base
+
+    stem = base.stem
+    suffix = base.suffix
+    counter = 2
+    while True:
+        candidate = base.with_name(f"{stem}-{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
 
 
 def has_playable_video_stream(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
     if shutil.which("ffprobe") is None:
-        return path.exists() and path.stat().st_size > 0
+        return True
     proc = subprocess.run(
         [
             "ffprobe",
@@ -138,13 +144,74 @@ def has_playable_video_stream(path: Path) -> bool:
     return proc.returncode == 0 and "video" in proc.stdout
 
 
-class WebcamWindowController:
-    """Controls an ffplay webcam preview window in window webcam mode."""
+def quote_concat_path(path: Path) -> str:
+    return str(path).replace("'", r"'\''")
 
-    def __init__(self, args: argparse.Namespace) -> None:
-        self.args = args
-        self.process: subprocess.Popen | None = None
-        self.title = f"scrnrcdr-webcam-{os.getpid()}-{int(time.time())}"
+
+def read_pipe(pipe: object) -> str:
+    if pipe is None:
+        return ""
+    try:
+        return pipe.read().strip()
+    except ValueError:
+        return ""
+
+
+def summarize_error(prefix: str, stderr_output: str) -> str:
+    lines = [line.strip() for line in stderr_output.splitlines() if line.strip()]
+    if not lines:
+        return prefix
+    return f"{prefix} {lines[-1]}"
+
+
+@dataclass
+class AppConfig:
+    display: str = field(default_factory=lambda: os.environ.get("DISPLAY", ":0.0"))
+    fps: int = 30
+    webcam_device: str = "/dev/video0"
+    webcam_width: int = 320
+    webcam_window_x: int = 20
+    webcam_window_y: int = 20
+    webcam_always_on_top: bool = True
+
+
+@dataclass
+class ControllerState:
+    mode: str = "idle"
+    status: str = "Ready."
+    busy: bool = False
+    webcam_enabled: bool = False
+    webcam_preview_running: bool = False
+    mic_enabled: bool = False
+    mic_available: bool = False
+    desktop_audio_available: bool = False
+    webcam_available: bool = False
+    ffmpeg_available: bool = False
+    ffplay_available: bool = False
+    current_output: str = ""
+    last_output: str = ""
+
+
+@dataclass
+class RecordingSession:
+    final_output: Path
+    temp_dir: Path
+    segments: list[Path] = field(default_factory=list)
+
+
+@dataclass
+class ActiveSegment:
+    path: Path
+    process: subprocess.Popen[str]
+
+
+class WebcamWindowController:
+    """Controls the live webcam preview window."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+        self.process: subprocess.Popen[str] | None = None
+        self.title = "smriti - webcam"
 
     def _build_command(self) -> list[str]:
         command = [
@@ -160,23 +227,23 @@ class WebcamWindowController:
             "-window_title",
             self.title,
             "-left",
-            str(self.args.webcam_window_x),
+            str(self.config.webcam_window_x),
             "-top",
-            str(self.args.webcam_window_y),
+            str(self.config.webcam_window_y),
             "-vf",
-            f"scale={self.args.webcam_width}:-1",
+            f"scale={self.config.webcam_width}:-1",
             "-f",
             "v4l2",
             "-framerate",
-            str(self.args.fps),
+            str(self.config.fps),
             "-i",
-            self.args.webcam_device,
+            self.config.webcam_device,
         ]
-        if self.args.webcam_always_on_top:
+        if self.config.webcam_always_on_top:
             command.insert(1, "-alwaysontop")
         return command
 
-    def _launch(self) -> subprocess.Popen:
+    def _launch(self) -> subprocess.Popen[str]:
         return subprocess.Popen(
             self._build_command(),
             stdout=subprocess.DEVNULL,
@@ -185,39 +252,37 @@ class WebcamWindowController:
         )
 
     def start(self) -> None:
-        webcam_path = Path(self.args.webcam_device)
+        webcam_path = Path(self.config.webcam_device)
         if not webcam_path.exists():
-            raise ValueError(f"Webcam device does not exist: {self.args.webcam_device}")
+            raise RuntimeError(f"Webcam device does not exist: {self.config.webcam_device}")
+        if shutil.which("ffplay") is None:
+            raise RuntimeError("ffplay is not installed or not in PATH.")
 
         self.process = self._launch()
-        time.sleep(1.0)
+        time.sleep(0.8)
         if self.process.poll() is not None:
-            message = "Failed to start webcam preview window."
-            if self.process.stderr:
-                stderr_tail = self.process.stderr.read().strip().splitlines()
-                if stderr_tail:
-                    message = f"{message} {stderr_tail[-1]}"
-            raise ValueError(message)
+            stderr_output = read_pipe(self.process.stderr)
+            self.process = None
+            raise RuntimeError(summarize_error("Failed to start webcam preview.", stderr_output))
 
-    def ensure_running(self) -> None:
+    def ensure_running(self) -> bool:
         if not self.process:
-            return
+            return False
         if self.process.poll() is None:
-            return
+            return True
 
-        # ffplay exits cleanly on Esc/q; relaunch to keep the webcam window active.
+        stderr_output = read_pipe(self.process.stderr)
         exited_with = self.process.returncode
-        if self.process.stderr:
-            self.process.stderr.close()
-        if exited_with == 0:
-            self.process = self._launch()
-            time.sleep(0.2)
-            if self.process.poll() is not None:
-                if self.process.stderr:
-                    self.process.stderr.close()
-                self.process = None
-            return
         self.process = None
+        if exited_with == 0:
+            try:
+                self.start()
+                return True
+            except RuntimeError:
+                return False
+        if stderr_output:
+            return False
+        return False
 
     def stop(self) -> None:
         if not self.process:
@@ -231,128 +296,98 @@ class WebcamWindowController:
                 self.process.wait(timeout=2)
         if self.process.stderr:
             self.process.stderr.close()
+        self.process = None
 
 
-def build_ffmpeg_command(args: argparse.Namespace) -> tuple[list[str], list[str]]:
-    cmd: list[str] = ["ffmpeg", "-hide_banner", "-n", "-nostdin"]
-    notes: list[str] = []
+def resolve_audio_sources(mic_enabled: bool) -> tuple[str | None, str | None, list[str]]:
+    sources = get_pulse_sources()
+    warnings: list[str] = []
 
-    if args.region:
-        video_size, offset_x, offset_y = parse_region(args.region)
-        notes.append(f"capture region: {args.region}")
-    else:
-        offset_x = 0
-        offset_y = 0
-        if args.screen_size:
-            if not SIZE_PATTERN.match(args.screen_size):
-                raise ValueError("--screen-size must match WIDTHxHEIGHT (example: 1920x1080)")
-            video_size = args.screen_size
-            notes.append(f"screen size: {video_size} (manual)")
-        else:
-            detected_size = detect_screen_size()
-            video_size = detected_size if detected_size else None
-            if video_size:
-                notes.append(f"screen size: {video_size} (detected)")
-            else:
-                notes.append("screen size: not detected (ffmpeg default)")
+    desktop_source = pick_default_desktop_source(sources)
+    if not desktop_source:
+        warnings.append("Desktop audio unavailable; recording silence instead.")
 
-    display_input = f"{args.display}+{offset_x},{offset_y}"
-    cmd.extend(["-thread_queue_size", "1024", "-f", "x11grab", "-framerate", str(args.fps)])
-    if video_size:
-        cmd.extend(["-video_size", video_size])
-    cmd.extend(["-i", display_input])
-    notes.append(f"display input: {display_input}")
+    mic_source = None
+    if mic_enabled:
+        mic_source = pick_default_mic_source(sources)
+        if not mic_source:
+            warnings.append("Microphone unavailable; continuing without mic.")
+
+    return desktop_source, mic_source, warnings
+
+
+def build_segment_command(
+    config: AppConfig,
+    output_path: Path,
+    mic_enabled: bool,
+) -> tuple[list[str], list[str]]:
+    command: list[str] = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-nostdin",
+        "-thread_queue_size",
+        "1024",
+        "-f",
+        "x11grab",
+        "-framerate",
+        str(config.fps),
+    ]
+
+    screen_size = detect_screen_size()
+    if screen_size:
+        command.extend(["-video_size", screen_size])
+
+    command.extend(["-i", f"{config.display}+0,0"])
+
+    desktop_source, mic_source, warnings = resolve_audio_sources(mic_enabled)
 
     input_index = 1
-    webcam_index: int | None = None
-    if args.webcam and args.webcam_mode == "overlay":
-        webcam_path = Path(args.webcam_device)
-        if not webcam_path.exists():
-            raise ValueError(f"Webcam device does not exist: {args.webcam_device}")
-        cmd.extend(
-            [
-                "-thread_queue_size",
-                "1024",
-                "-f",
-                "v4l2",
-                "-framerate",
-                str(args.fps),
-                "-i",
-                args.webcam_device,
-            ]
-        )
-        webcam_index = input_index
+    desktop_index: int | None = None
+    if desktop_source:
+        command.extend(["-thread_queue_size", "1024", "-f", "pulse", "-i", desktop_source])
+        desktop_index = input_index
         input_index += 1
-        notes.append(
-            f"webcam: {args.webcam_device} overlay={args.webcam_width}px at ({args.webcam_x},{args.webcam_y})"
-        )
-    elif args.webcam and args.webcam_mode == "window":
-        notes.append(
-            "webcam: window mode "
-            f"device={args.webcam_device} width={args.webcam_width}px start=({args.webcam_window_x},{args.webcam_window_y})"
-        )
-        if args.webcam_always_on_top:
-            notes.append("webcam window: always on top")
 
-    pulse_sources = get_pulse_sources() if (args.mic or args.desktop_audio) else []
-    if (args.mic or args.desktop_audio) and not pulse_sources:
-        raise ValueError("Could not read PulseAudio/PipeWire sources (is pactl running?)")
-
-    audio_inputs: list[tuple[str, int, str]] = []
-    if args.mic:
-        mic_source = args.mic_source or pick_default_mic_source(pulse_sources)
-        if not mic_source:
-            raise ValueError(
-                "No microphone source found. Try --mic-source with one from --list-audio-sources."
-            )
-        if mic_source not in pulse_sources:
-            raise ValueError(f"Mic source not found: {mic_source}")
-        cmd.extend(["-thread_queue_size", "1024", "-f", "pulse", "-i", mic_source])
-        audio_inputs.append(("mic", input_index, mic_source))
+    mic_index: int | None = None
+    if mic_source:
+        command.extend(["-thread_queue_size", "1024", "-f", "pulse", "-i", mic_source])
+        mic_index = input_index
         input_index += 1
-        notes.append(f"mic source: {mic_source}")
 
-    if args.desktop_audio:
-        desktop_source = args.desktop_source or pick_default_desktop_source(pulse_sources)
-        if not desktop_source:
-            raise ValueError(
-                "No desktop monitor source found. Try --desktop-source with one from --list-audio-sources."
-            )
-        if desktop_source not in pulse_sources:
-            raise ValueError(f"Desktop audio source not found: {desktop_source}")
-        cmd.extend(["-thread_queue_size", "1024", "-f", "pulse", "-i", desktop_source])
-        audio_inputs.append(("desktop", input_index, desktop_source))
-        input_index += 1
-        notes.append(f"desktop source: {desktop_source}")
+    command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
+    silence_index = input_index
 
-    filters: list[str] = []
-    if webcam_index is not None:
-        filters.append(f"[{webcam_index}:v]scale={args.webcam_width}:-1[cam]")
-        filters.append(f"[0:v][cam]overlay=x={args.webcam_x}:y={args.webcam_y}[vout]")
-        video_map = "[vout]"
+    audio_inputs: list[str] = []
+    if desktop_index is not None:
+        audio_inputs.append(f"[{desktop_index}:a]")
+    if mic_index is not None:
+        audio_inputs.append(f"[{mic_index}:a]")
+    audio_inputs.append(f"[{silence_index}:a]")
+
+    if len(audio_inputs) == 1:
+        audio_filter = (
+            f"{audio_inputs[0]}aformat=sample_fmts=fltp:sample_rates=48000:"
+            "channel_layouts=stereo[aout]"
+        )
     else:
-        video_map = "0:v"
-
-    audio_map: str | None = None
-    if len(audio_inputs) == 2:
-        first_idx = audio_inputs[0][1]
-        second_idx = audio_inputs[1][1]
-        filters.append(
-            f"[{first_idx}:a][{second_idx}:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]"
+        audio_filter = (
+            "".join(audio_inputs)
+            + f"amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=0,"
+            "aresample=async=1:first_pts=0,"
+            "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]"
         )
-        audio_map = "[aout]"
-    elif len(audio_inputs) == 1:
-        audio_map = f"{audio_inputs[0][1]}:a"
 
-    if filters:
-        cmd.extend(["-filter_complex", ";".join(filters)])
-
-    cmd.extend(["-map", video_map])
-    if audio_map:
-        cmd.extend(["-map", audio_map])
-
-    cmd.extend(
+    command.extend(
         [
+            "-filter_complex",
+            audio_filter,
+            "-map",
+            "0:v",
+            "-map",
+            "[aout]",
             "-c:v",
             "libx264",
             "-preset",
@@ -362,289 +397,717 @@ def build_ffmpeg_command(args: argparse.Namespace) -> tuple[list[str], list[str]
             "-pix_fmt",
             "yuv420p",
             "-r",
-            str(args.fps),
+            str(config.fps),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            str(output_path),
         ]
     )
 
-    if audio_map:
-        cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
-    else:
-        cmd.append("-an")
-
-    if args.duration is not None and args.duration > 0:
-        cmd.extend(["-t", str(args.duration)])
-        notes.append(f"duration: {args.duration}s")
-
-    cmd.extend(["-movflags", "+faststart", str(args.output)])
-    notes.append(f"output: {args.output}")
-    return cmd, notes
+    return command, warnings
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "X11 screen recorder with optional webcam (window/overlay) and optional mic/desktop audio. "
-            "Press Ctrl+C to stop."
-        )
-    )
-    parser.add_argument("--output", type=Path, default=None, help="Output path (default: timestamped mp4)")
-    parser.add_argument("--fps", type=int, default=30, help="Frames per second (default: 30)")
-    parser.add_argument(
-        "--display",
-        default=os.environ.get("DISPLAY", ":0.0"),
-        help="X11 display (default: $DISPLAY or :0.0)",
-    )
-    parser.add_argument(
-        "--screen-size",
-        default=None,
-        help="Manual screen size WIDTHxHEIGHT (example: 1920x1080)",
-    )
-    parser.add_argument(
-        "--region",
-        default=None,
-        help="Capture region WIDTHxHEIGHT+X,Y (example: 1280x720+100,80)",
-    )
-    parser.add_argument(
-        "--duration",
-        type=int,
-        default=None,
-        help="Optional auto-stop duration in seconds",
-    )
-    parser.add_argument(
-        "--webcam",
-        action="store_true",
-        help="Enable webcam (window or overlay depending on --webcam-mode)",
-    )
-    parser.add_argument(
-        "--webcam-mode",
-        choices=["window", "overlay"],
-        default="window",
-        help=(
-            "Webcam mode: 'window' for draggable webcam preview window (captured from desktop), "
-            "or 'overlay' for ffmpeg composited overlay (default: window)"
-        ),
-    )
-    parser.add_argument(
-        "--webcam-device",
-        default="/dev/video0",
-        help="Webcam device path (default: /dev/video0)",
-    )
-    parser.add_argument(
-        "--webcam-width",
-        type=int,
-        default=320,
-        help="Webcam width in pixels (default: 320)",
-    )
-    parser.add_argument(
-        "--webcam-x",
-        default="main_w-overlay_w-20",
-        help="Webcam X position expression for ffmpeg overlay filter",
-    )
-    parser.add_argument(
-        "--webcam-y",
-        default="main_h-overlay_h-20",
-        help="Webcam Y position expression for ffmpeg overlay filter",
-    )
-    parser.add_argument(
-        "--webcam-window-x",
-        type=int,
-        default=20,
-        help="Initial webcam window X position in pixels (window mode)",
-    )
-    parser.add_argument(
-        "--webcam-window-y",
-        type=int,
-        default=20,
-        help="Initial webcam window Y position in pixels (window mode)",
-    )
-    parser.add_argument(
-        "--webcam-always-on-top",
-        action="store_true",
-        help="Keep webcam preview window above other windows (window mode)",
-    )
-    parser.add_argument("--mic", action="store_true", help="Enable microphone capture")
-    parser.add_argument(
-        "--desktop-audio",
-        action="store_true",
-        help="Enable desktop/system audio capture",
-    )
-    parser.add_argument("--mic-source", default=None, help="Manual Pulse source name for mic")
-    parser.add_argument(
-        "--desktop-source",
-        default=None,
-        help="Manual Pulse source name for desktop/system audio",
-    )
-    parser.add_argument(
-        "--list-audio-sources",
-        action="store_true",
-        help="Print Pulse sources and exit",
-    )
-    parser.add_argument(
-        "--list-video-devices",
-        action="store_true",
-        help="Print /dev/video* devices and exit",
-    )
-    parser.add_argument(
-        "--show-command",
-        action="store_true",
-        help="Print generated ffmpeg command before recording",
-    )
-    return parser.parse_args()
+class RecorderController:
+    """Serializes recorder operations off the UI thread."""
 
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+        self.state = ControllerState(status="Checking environment...")
+        self.events: queue.Queue[dict[str, object]] = queue.Queue()
+        self.commands: queue.Queue[tuple[str, object | None]] = queue.Queue()
+        self.webcam_controller = WebcamWindowController(config)
+        self.session: RecordingSession | None = None
+        self.active_segment: ActiveSegment | None = None
+        self.stop_requested = False
+        self._refresh_capabilities()
+        self._publish_state()
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
 
-def print_lists_and_exit(args: argparse.Namespace) -> bool:
-    did_print = False
-    if args.list_audio_sources:
-        did_print = True
-        sources = get_pulse_sources()
-        if sources:
-            print("Audio sources:")
-            for source in sources:
-                print(f"  - {source}")
+    def _refresh_capabilities(self) -> None:
+        pulse_sources = get_pulse_sources()
+        self.state.ffmpeg_available = shutil.which("ffmpeg") is not None
+        self.state.ffplay_available = shutil.which("ffplay") is not None
+        self.state.webcam_available = Path(self.config.webcam_device).exists()
+        self.state.mic_available = pick_default_mic_source(pulse_sources) is not None
+        self.state.desktop_audio_available = pick_default_desktop_source(pulse_sources) is not None
+
+        if not self.state.ffmpeg_available:
+            self.state.status = "ffmpeg is required but not installed or not in PATH."
+        elif not self.config.display:
+            self.state.status = "DISPLAY is not set."
+        elif self.state.status == "Checking environment...":
+            self.state.status = "Ready."
+
+    def _publish_state(self) -> None:
+        if self.state.webcam_enabled:
+            self.state.webcam_preview_running = self.webcam_controller.ensure_running()
         else:
-            print("No audio sources found (check pactl / PulseAudio / PipeWire).")
+            self.state.webcam_preview_running = False
+        self.events.put({"type": "state", "state": asdict(self.state)})
 
-    if args.list_video_devices:
-        did_print = True
-        devices = list_video_devices()
-        if devices:
-            print("Video devices:")
-            for device in devices:
-                print(f"  - {device}")
-        else:
-            print("No /dev/video* devices found.")
+    def send(self, name: str, payload: object | None = None) -> None:
+        self.commands.put((name, payload))
 
-    return did_print
-
-
-def run_recording(
-    command: list[str],
-    notes: list[str],
-    show_command: bool,
-    output_path: Path,
-    webcam_controller: WebcamWindowController | None = None,
-) -> int:
-    print("Recorder configuration:", flush=True)
-    for note in notes:
-        print(f"  - {note}", flush=True)
-
-    if show_command:
-        print("\nffmpeg command:", flush=True)
-        print(shlex.join(command), flush=True)
-
-    if webcam_controller:
-        try:
-            webcam_controller.start()
-        except ValueError as err:
-            print(f"Configuration error: {err}", file=sys.stderr)
-            return 1
-        print(
-            "Webcam window mode: drag the webcam window with mouse. "
-            "Press Ctrl+C in this terminal to stop recording.",
-            flush=True,
-        )
-
-    print("\nRecording started. Press Ctrl+C to stop.\n", flush=True)
-    interrupted = False
-    process = subprocess.Popen(command)
-    return_code: int | None = None
-
-    try:
-        while True:
+    def _run_loop(self) -> None:
+        while not self.stop_requested:
             try:
-                return_code = process.wait(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                if webcam_controller:
-                    webcam_controller.ensure_running()
-    except KeyboardInterrupt:
-        interrupted = True
-        print("\nStopping recording gracefully. Please wait...", flush=True)
-        process.send_signal(signal.SIGINT)
+                name, payload = self.commands.get(timeout=0.25)
+            except queue.Empty:
+                self._poll_background_processes()
+                continue
+
+            try:
+                if name == "toggle_webcam":
+                    self._handle_toggle_webcam(bool(payload))
+                elif name == "toggle_mic":
+                    self._handle_toggle_mic(bool(payload))
+                elif name == "start":
+                    self._handle_start()
+                elif name == "pause":
+                    self._handle_pause()
+                elif name == "stop":
+                    self._handle_stop()
+                elif name == "shutdown":
+                    self._handle_shutdown()
+                else:
+                    self.state.status = f"Unknown command: {name}"
+            except Exception as err:  # pragma: no cover - defensive UI safety.
+                self.state.busy = False
+                self.state.status = str(err)
+            finally:
+                self._refresh_capabilities()
+                self._publish_state()
+
+    def _poll_background_processes(self) -> None:
+        preview_running = False
+        if self.state.webcam_enabled:
+            preview_running = self.webcam_controller.ensure_running()
+            if not preview_running and self.state.webcam_enabled:
+                self.state.status = "Webcam preview is not running."
+        self.state.webcam_preview_running = preview_running
+
+        if self.active_segment and self.active_segment.process.poll() is not None:
+            kept, message = self._collect_finished_segment()
+            self.active_segment = None
+            if self.session and self.session.segments:
+                self.state.mode = "paused"
+                self.state.status = message or "Recording stopped unexpectedly. Press Start to resume."
+            else:
+                self.state.mode = "idle"
+                self.state.current_output = ""
+                self.state.status = message or "Recording stopped unexpectedly."
+                self._clear_session_files(keep_segments=kept)
+                self.session = None
+            self._publish_state()
+
+    def _handle_toggle_webcam(self, enabled: bool) -> None:
+        self.state.busy = True
+        self._refresh_capabilities()
+        if enabled:
+            if not self.state.ffplay_available:
+                self.state.webcam_enabled = False
+                self.state.status = "ffplay is required for the webcam preview."
+                self.state.busy = False
+                return
+            if not self.state.webcam_available:
+                self.state.webcam_enabled = False
+                self.state.status = f"Webcam device not found: {self.config.webcam_device}"
+                self.state.busy = False
+                return
+            self.webcam_controller.start()
+            self.state.webcam_enabled = True
+            self.state.status = "Webcam preview enabled."
+        else:
+            self.webcam_controller.stop()
+            self.state.webcam_enabled = False
+            self.state.status = "Webcam preview disabled."
+        self.state.busy = False
+
+    def _handle_toggle_mic(self, enabled: bool) -> None:
+        self.state.busy = True
+        self._refresh_capabilities()
+        if enabled and not self.state.mic_available:
+            self.state.mic_enabled = False
+            self.state.status = "No microphone source is available right now."
+            self.state.busy = False
+            return
+
+        if self.state.mic_enabled == enabled:
+            self.state.busy = False
+            return
+
+        self.state.mic_enabled = enabled
+        if self.state.mode == "recording":
+            self.state.status = "Applying microphone change..."
+            self._rotate_segment()
+            if self.state.mode == "recording":
+                state_text = "enabled" if enabled else "disabled"
+                self.state.status = f"Microphone {state_text}."
+        else:
+            state_text = "enabled" if enabled else "disabled"
+            self.state.status = f"Microphone {state_text}."
+        self.state.busy = False
+
+    def _handle_start(self) -> None:
+        if not self.state.ffmpeg_available:
+            self.state.status = "ffmpeg is required but not installed or not in PATH."
+            return
+
+        self.state.busy = True
+        self._refresh_capabilities()
+        if self.state.mode == "recording":
+            self.state.busy = False
+            return
+
+        if self.session is None:
+            final_output = next_available_output_path()
+            final_output.parent.mkdir(parents=True, exist_ok=True)
+            temp_dir = Path(tempfile.mkdtemp(prefix="smriti-", dir="/tmp"))
+            self.session = RecordingSession(final_output=final_output, temp_dir=temp_dir)
+            self.state.current_output = str(final_output)
+
+        self._start_segment()
+        self.state.mode = "recording"
+        self.state.busy = False
+
+    def _handle_pause(self) -> None:
+        if self.state.mode != "recording":
+            return
+
+        self.state.busy = True
+        self.state.status = "Pausing recording..."
+        self._stop_current_segment()
+        self.state.mode = "paused"
+        self.state.status = "Paused."
+        self.state.busy = False
+
+    def _handle_stop(self) -> None:
+        if self.session is None and self.active_segment is None:
+            self.state.mode = "idle"
+            self.state.status = "Ready."
+            return
+
+        self.state.busy = True
+        self.state.status = "Finalizing recording..."
+        saved_path: Path | None = None
         try:
-            process.wait()
-        except KeyboardInterrupt:
-            print("Force stopping recording...", flush=True)
-            if process.poll() is None:
+            if self.state.mode == "recording":
+                self._stop_current_segment()
+            saved_path = self._finalize_session()
+        finally:
+            self.state.mode = "idle"
+            self.state.current_output = ""
+            self.state.busy = False
+
+        self.state.last_output = str(saved_path) if saved_path else self.state.last_output
+        if saved_path:
+            self.state.status = f"Saved recording: {saved_path}"
+        else:
+            self.state.status = "Nothing was saved."
+
+    def _handle_shutdown(self) -> None:
+        self.state.busy = True
+        try:
+            if self.state.mode == "recording":
+                self._stop_current_segment()
+            if self.session is not None:
+                saved_path = self._finalize_session()
+                if saved_path:
+                    self.state.last_output = str(saved_path)
+        finally:
+            self.webcam_controller.stop()
+            self.state.webcam_enabled = False
+            self.state.mode = "idle"
+            self.state.current_output = ""
+            self.state.busy = False
+            self.stop_requested = True
+
+    def _start_segment(self) -> None:
+        assert self.session is not None
+
+        segment_path = self.session.temp_dir / f"segment-{len(self.session.segments) + 1:04d}.mp4"
+        command, warnings = build_segment_command(
+            config=self.config,
+            output_path=segment_path,
+            mic_enabled=self.state.mic_enabled,
+        )
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.8)
+        if process.poll() is not None:
+            stderr_output = read_pipe(process.stderr)
+            raise RuntimeError(summarize_error("Failed to start recording.", stderr_output))
+
+        self.active_segment = ActiveSegment(path=segment_path, process=process)
+        if warnings:
+            self.state.status = " ".join(warnings)
+        else:
+            self.state.status = "Recording..."
+
+    def _rotate_segment(self) -> None:
+        self._stop_current_segment()
+        if self.session is None:
+            return
+        self.state.mode = "paused"
+        self._start_segment()
+        self.state.mode = "recording"
+
+    def _stop_current_segment(self) -> None:
+        if not self.active_segment:
+            return
+
+        process = self.active_segment.process
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
                 process.terminate()
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=3)
-    finally:
-        if webcam_controller:
-            webcam_controller.stop()
 
-    if return_code is None:
-        return_code = process.returncode
-    if return_code is None:
-        return_code = 1
+        kept, message = self._collect_finished_segment()
+        self.active_segment = None
+        if message:
+            self.state.status = message
+        if not kept and self.session and not self.session.segments:
+            self.state.status = "The latest segment could not be finalized."
 
-    if interrupted and return_code in (0, 130, 255):
-        return_code = 0
+    def _collect_finished_segment(self) -> tuple[bool, str | None]:
+        if not self.active_segment or self.session is None:
+            return False, None
 
-    if return_code == 0:
-        if not has_playable_video_stream(output_path):
-            print(
-                (
-                    "Recording finished but output has no playable video stream. "
-                    "This usually means recording was force-stopped before finalization."
-                ),
-                file=sys.stderr,
+        segment_path = self.active_segment.path
+        process = self.active_segment.process
+        stderr_output = read_pipe(process.stderr)
+        if process.stderr:
+            process.stderr.close()
+
+        playable = has_playable_video_stream(segment_path)
+        if playable:
+            self.session.segments.append(segment_path)
+            if process.returncode not in (0, 130, 255, -2):
+                return True, summarize_error(
+                    "Recorder exited with a warning; kept the segment.",
+                    stderr_output,
+                )
+            return True, None
+
+        if segment_path.exists():
+            return False, summarize_error("Discarded an incomplete segment.", stderr_output)
+        return False, summarize_error("Recorder stopped without producing a playable segment.", stderr_output)
+
+    def _finalize_session(self) -> Path | None:
+        if self.session is None:
+            return None
+
+        success = False
+        result: Path | None = None
+        temp_dir = self.session.temp_dir
+        try:
+            if not self.session.segments:
+                self._clear_session_files(keep_segments=False)
+                return None
+
+            self.session.final_output.parent.mkdir(parents=True, exist_ok=True)
+            if len(self.session.segments) == 1:
+                shutil.move(str(self.session.segments[0]), str(self.session.final_output))
+                result = self.session.final_output
+                success = True
+                return result
+
+            concat_list = self.session.temp_dir / "segments.txt"
+            concat_lines = [
+                f"file '{quote_concat_path(segment)}'" for segment in self.session.segments
+            ]
+            concat_list.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+
+            merged_copy = self.session.temp_dir / "merged-copy.mp4"
+            copy_proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(concat_list),
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    str(merged_copy),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
             )
-            return 1
-        print(f"Saved recording: {output_path}", flush=True)
-        return 0
-    return return_code
+            if copy_proc.returncode == 0 and has_playable_video_stream(merged_copy):
+                shutil.move(str(merged_copy), str(self.session.final_output))
+                result = self.session.final_output
+                success = True
+                return result
+
+            merged_reencode = self.session.temp_dir / "merged-reencode.mp4"
+            reencode_proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    str(concat_list),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-ac",
+                    "2",
+                    "-ar",
+                    "48000",
+                    "-movflags",
+                    "+faststart",
+                    str(merged_reencode),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if reencode_proc.returncode == 0 and has_playable_video_stream(merged_reencode):
+                shutil.move(str(merged_reencode), str(self.session.final_output))
+                result = self.session.final_output
+                success = True
+                return result
+
+            copy_error = summarize_error("Merge failed.", copy_proc.stderr or "")
+            reencode_error = summarize_error("Fallback merge failed.", reencode_proc.stderr or "")
+            raise RuntimeError(f"{copy_error} {reencode_error}".strip())
+        except Exception as err:
+            self.session = None
+            raise RuntimeError(f"{err} Segment files were kept in {temp_dir}.") from err
+        finally:
+            if success:
+                self._clear_session_files(keep_segments=False)
+
+        return result
+
+    def _clear_session_files(self, keep_segments: bool) -> None:
+        if self.session is None:
+            return
+
+        temp_dir = self.session.temp_dir
+        if keep_segments:
+            return
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        self.session = None
+
+
+class RecorderApp:
+    POLL_INTERVAL_MS = 150
+
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("smriti")
+        self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.expanded = True
+        self.state: ControllerState | None = None
+        self.controller = RecorderController(AppConfig())
+
+        self._build_ui()
+        self._poll_events()
+
+    def _build_ui(self) -> None:
+        self.root.configure(bg="#f2efe7")
+
+        self.shell = tk.Frame(self.root, bg="#f2efe7", padx=12, pady=12)
+        self.shell.pack(fill="both", expand=True)
+
+        self.toolbar = tk.Frame(self.shell, bg="#f2efe7")
+        self.toolbar.pack(fill="x")
+
+        self.arrow_button = tk.Button(
+            self.toolbar,
+            text="^",
+            width=3,
+            command=self.toggle_expanded,
+            bg="#ddd6c5",
+            relief=tk.RAISED,
+        )
+        self.arrow_button.pack(side="left", padx=(0, 8))
+
+        self.title_label = tk.Label(
+            self.toolbar,
+            text="smriti",
+            font=("TkDefaultFont", 12, "bold"),
+            bg="#f2efe7",
+            fg="#1f2933",
+        )
+        self.title_label.pack(side="left")
+
+        self.mode_label = tk.Label(
+            self.toolbar,
+            text="idle",
+            bg="#f2efe7",
+            fg="#5b6470",
+            padx=10,
+        )
+        self.mode_label.pack(side="right")
+
+        self.buttons = tk.Frame(self.shell, bg="#f2efe7", pady=10)
+        self.buttons.pack(fill="x")
+
+        self.webcam_button = tk.Button(
+            self.buttons,
+            text="Webcam Off",
+            width=12,
+            command=self.on_toggle_webcam,
+            bg="#d8dee6",
+        )
+        self.webcam_button.pack(side="left", padx=(0, 8))
+
+        self.mic_button = tk.Button(
+            self.buttons,
+            text="Mic Off",
+            width=12,
+            command=self.on_toggle_mic,
+            bg="#d8dee6",
+        )
+        self.mic_button.pack(side="left", padx=(0, 8))
+
+        self.start_button = tk.Button(
+            self.buttons,
+            text="Start",
+            width=10,
+            command=self.on_start,
+            bg="#b9d8a7",
+        )
+        self.start_button.pack(side="left", padx=(0, 8))
+
+        self.pause_button = tk.Button(
+            self.buttons,
+            text="Pause",
+            width=10,
+            command=self.on_pause,
+            bg="#e8d08a",
+        )
+        self.pause_button.pack(side="left", padx=(0, 8))
+
+        self.stop_button = tk.Button(
+            self.buttons,
+            text="Stop",
+            width=10,
+            command=self.on_stop,
+            bg="#e7a4a4",
+        )
+        self.stop_button.pack(side="left")
+
+        self.details = tk.Frame(self.shell, bg="#f2efe7")
+        self.details.pack(fill="x")
+
+        self.status_label = tk.Label(
+            self.details,
+            text="Checking environment...",
+            anchor="w",
+            justify="left",
+            bg="#f2efe7",
+            fg="#1f2933",
+            wraplength=420,
+        )
+        self.status_label.pack(fill="x", pady=(4, 8))
+
+        self.audio_label = tk.Label(
+            self.details,
+            text="Desktop audio: checking",
+            anchor="w",
+            bg="#f2efe7",
+            fg="#5b6470",
+        )
+        self.audio_label.pack(fill="x")
+
+        self.preview_label = tk.Label(
+            self.details,
+            text="Webcam preview: off",
+            anchor="w",
+            bg="#f2efe7",
+            fg="#5b6470",
+        )
+        self.preview_label.pack(fill="x", pady=(4, 0))
+
+        self.output_label = tk.Label(
+            self.details,
+            text="Output: waiting for a recording",
+            anchor="w",
+            justify="left",
+            bg="#f2efe7",
+            fg="#5b6470",
+            wraplength=420,
+        )
+        self.output_label.pack(fill="x", pady=(8, 0))
+
+    def toggle_expanded(self) -> None:
+        self.expanded = not self.expanded
+        if self.expanded:
+            self.details.pack(fill="x")
+            self.arrow_button.configure(text="^")
+        else:
+            self.details.pack_forget()
+            self.arrow_button.configure(text="v")
+
+    def set_expanded(self, expanded: bool) -> None:
+        if self.expanded == expanded:
+            return
+        self.toggle_expanded()
+
+    def on_toggle_webcam(self) -> None:
+        if not self.state or self.state.busy:
+            return
+        self.controller.send("toggle_webcam", not self.state.webcam_enabled)
+
+    def on_toggle_mic(self) -> None:
+        if not self.state or self.state.busy:
+            return
+        self.controller.send("toggle_mic", not self.state.mic_enabled)
+
+    def on_start(self) -> None:
+        if not self.state or self.state.busy:
+            return
+        self.set_expanded(False)
+        self.controller.send("start")
+
+    def on_pause(self) -> None:
+        if not self.state or self.state.busy:
+            return
+        self.controller.send("pause")
+
+    def on_stop(self) -> None:
+        if not self.state or self.state.busy:
+            return
+        self.controller.send("stop")
+
+    def on_close(self) -> None:
+        self.start_button.configure(state=tk.DISABLED)
+        self.pause_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.DISABLED)
+        self.webcam_button.configure(state=tk.DISABLED)
+        self.mic_button.configure(state=tk.DISABLED)
+        self.status_label.configure(text="Closing smriti and finalizing any active recording...")
+        self.controller.send("shutdown")
+        self._wait_for_shutdown()
+
+    def _wait_for_shutdown(self) -> None:
+        if self.controller.thread.is_alive():
+            self.root.after(self.POLL_INTERVAL_MS, self._wait_for_shutdown)
+            return
+        self.root.destroy()
+
+    def _poll_events(self) -> None:
+        while True:
+            try:
+                event = self.controller.events.get_nowait()
+            except queue.Empty:
+                break
+            if event.get("type") == "state":
+                self._apply_state(event["state"])
+        self.root.after(self.POLL_INTERVAL_MS, self._poll_events)
+
+    def _apply_state(self, raw_state: object) -> None:
+        assert isinstance(raw_state, dict)
+        self.state = ControllerState(**raw_state)
+
+        state = self.state
+        self.mode_label.configure(text=state.mode)
+        self.status_label.configure(text=state.status)
+
+        desktop_audio_text = "Desktop audio: on" if state.desktop_audio_available else "Desktop audio: unavailable"
+        self.audio_label.configure(text=desktop_audio_text)
+
+        preview_text = "Webcam preview: on" if state.webcam_preview_running else "Webcam preview: off"
+        self.preview_label.configure(text=preview_text)
+
+        current_output = state.current_output or state.last_output
+        if current_output:
+            self.output_label.configure(text=f"Output: {current_output}")
+        else:
+            self.output_label.configure(text="Output: waiting for a recording")
+
+        webcam_bg = "#98c1a3" if state.webcam_enabled else "#d8dee6"
+        webcam_text = "Webcam On" if state.webcam_enabled else "Webcam Off"
+        self.webcam_button.configure(text=webcam_text, bg=webcam_bg)
+
+        mic_bg = "#98c1a3" if state.mic_enabled else "#d8dee6"
+        mic_text = "Mic On" if state.mic_enabled else "Mic Off"
+        self.mic_button.configure(text=mic_text, bg=mic_bg)
+
+        if state.mode == "paused":
+            start_text = "Resume"
+        elif state.mode == "recording":
+            start_text = "Recording"
+        else:
+            start_text = "Start"
+        self.start_button.configure(text=start_text)
+
+        controls_disabled = state.busy
+        can_record = state.ffmpeg_available and not controls_disabled
+        self.start_button.configure(state=tk.NORMAL if can_record and state.mode != "recording" else tk.DISABLED)
+        self.pause_button.configure(
+            state=tk.NORMAL if not controls_disabled and state.mode == "recording" else tk.DISABLED
+        )
+        self.stop_button.configure(
+            state=tk.NORMAL if not controls_disabled and state.mode in {"recording", "paused"} else tk.DISABLED
+        )
+        self.webcam_button.configure(state=tk.NORMAL if not controls_disabled else tk.DISABLED)
+        self.mic_button.configure(state=tk.NORMAL if not controls_disabled else tk.DISABLED)
+
+
+def launch_gui() -> int:
+    if tk is None:
+        print("tkinter is required to run the smriti GUI.", file=os.sys.stderr)
+        return 1
+
+    root = tk.Tk()
+    app = RecorderApp(root)
+    root.mainloop()
+    return 0
 
 
 def main() -> int:
-    args = parse_args()
-
-    if print_lists_and_exit(args):
-        return 0
-
-    if shutil.which("ffmpeg") is None:
-        print("ffmpeg is required but not installed or not in PATH.", file=sys.stderr)
-        return 1
-    if args.webcam and args.webcam_mode == "window" and shutil.which("ffplay") is None:
-        print("ffplay is required for --webcam-mode window but is not installed or not in PATH.", file=sys.stderr)
-        return 1
-
-    args.output = args.output.expanduser() if args.output else default_output_path()
-    if args.output.exists():
-        print(f"Output file already exists: {args.output}", file=sys.stderr)
-        return 1
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-
-    if args.fps <= 0:
-        print("--fps must be greater than zero.", file=sys.stderr)
-        return 1
-    if args.webcam_width <= 0:
-        print("--webcam-width must be greater than zero.", file=sys.stderr)
-        return 1
-    if args.webcam and not Path(args.webcam_device).exists():
-        print(f"Webcam device does not exist: {args.webcam_device}", file=sys.stderr)
-        return 1
-
-    try:
-        command, notes = build_ffmpeg_command(args)
-    except ValueError as err:
-        print(f"Configuration error: {err}", file=sys.stderr)
-        return 1
-
-    webcam_controller = None
-    if args.webcam and args.webcam_mode == "window":
-        webcam_controller = WebcamWindowController(args)
-
-    return run_recording(
-        command,
-        notes,
-        args.show_command,
-        output_path=args.output,
-        webcam_controller=webcam_controller,
-    )
+    return launch_gui()
 
 
 if __name__ == "__main__":

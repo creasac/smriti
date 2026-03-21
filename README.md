@@ -1,118 +1,66 @@
-# scrnrcdr (X11 minimal recorder)
+# smriti
 
-Minimal Linux screen recorder for X11 using `ffmpeg` with:
+Minimal X11 desktop recorder with a small control window.
 
-- whole desktop or region capture
-- optional webcam:
-  - draggable window mode (default)
-  - ffmpeg overlay mode (fallback)
-- optional microphone and optional desktop audio
+It opens a GUI with:
+
+- `Webcam` toggle
+- `Mic` toggle
+- `Start`, `Pause`, and `Stop`
+- auto-saved MP4 recordings in `~/Videos/smriti/`
+
+The webcam preview is a separate draggable window. When it is visible on the desktop, it is captured in the recording. The control window can be collapsed with the arrow button, and starting a recording auto-collapses it.
 
 ## Requirements
 
 - Linux X11 session
-- `ffmpeg` installed and available in `PATH`
-- `pactl` available for auto audio source detection (typically PulseAudio or PipeWire Pulse)
+- `ffmpeg`
+- `ffplay`
+- `pactl` for desktop audio and mic auto-detection
+- Python `tkinter`
 
-## Quick start
+## Run
+
+From the repository root:
+
+```bash
+./smriti
+```
+
+You can also run:
 
 ```bash
 python3 recorder.py
 ```
 
-This records the whole desktop to a timestamped MP4 in the current directory.
+## Install
 
-Stop recording with `Ctrl+C`.
-
-## Common usage
-
-Record desktop + mic + desktop audio:
+To install `smriti` as a real command and desktop app entry:
 
 ```bash
-python3 recorder.py --mic --desktop-audio
+./install.sh
 ```
 
-Add webcam (window mode by default, width 320):
+This installs:
 
-```bash
-python3 recorder.py --webcam --mic --desktop-audio
-```
+- `~/.local/bin/smriti`
+- `~/.local/share/smriti/`
+- `~/.local/share/applications/smriti.desktop`
 
-Webcam window mode controls while recording:
+If `~/.local/bin` is not already on your `PATH`, the installer appends it to `~/.bashrc`.
 
-- drag webcam window with mouse to place anywhere
-- put another window on top to hide webcam from recording
-- press `Ctrl+C` in recorder terminal to stop recording
+## Recording behavior
 
-Move webcam overlay (overlay mode only):
-
-```bash
-python3 recorder.py --webcam --webcam-mode overlay --webcam-x 20 --webcam-y 20
-```
-
-Set webcam width (works in both modes):
-
-```bash
-python3 recorder.py --webcam --webcam-width 420
-```
-
-Set webcam window initial position (window mode):
-
-```bash
-python3 recorder.py --webcam --webcam-window-x 80 --webcam-window-y 60
-```
-
-Record a region only (`WIDTHxHEIGHT+X,Y`):
-
-```bash
-python3 recorder.py --region 1280x720+100,80
-```
-
-Set output path:
-
-```bash
-python3 recorder.py --output ~/Videos/demo.mp4
-```
-
-Show generated ffmpeg command before start:
-
-```bash
-python3 recorder.py --show-command --webcam --mic --desktop-audio
-```
-
-## Device/source helpers
-
-List audio sources:
-
-```bash
-python3 recorder.py --list-audio-sources
-```
-
-List webcam/video devices:
-
-```bash
-python3 recorder.py --list-video-devices
-```
-
-Use specific sources/devices:
-
-```bash
-python3 recorder.py \
-  --mic --desktop-audio --webcam \
-  --mic-source alsa_input.usb-YourMic \
-  --desktop-source alsa_output.pci-0000_00_1f.3.analog-stereo.monitor \
-  --webcam-device /dev/video2
-```
+- Desktop audio is captured automatically when available.
+- The mic can be turned on or off at any time.
+- The webcam preview can be turned on or off at any time.
+- `Pause` and `Resume` keep the same recording session.
+- `Stop` saves the current recording.
+- After `Stop`, pressing `Start` creates a new recording right away.
 
 ## Notes
 
-- This tool is intentionally X11-focused.
-- Browser-tab capture is not implemented.
-- Window-only capture is not implemented yet (region capture is available now).
-- Webcam mode defaults to `window` for mouse drag and overlap behavior.
-- To keep MP4 playable, stop with `Ctrl+C` and wait for finalization message.
-
-## Repository housekeeping
-
-- A `.gitignore` is included to ignore Python cache files and local recording outputs.
-- If `__pycache__/` already exists locally, it is safe to delete.
+- This is intentionally X11-focused.
+- The control window is part of the desktop, so if it is visible it can be recorded.
+- If desktop audio is not available, smriti records silent audio instead of failing.
+- If final merge fails after pause/resume or mic changes, the temporary segment files are kept and the app shows where they were left.
