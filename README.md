@@ -44,12 +44,31 @@ To install `smriti` as a real command and desktop app entry:
 This installs:
 
 - `~/.local/bin/smriti`
+- `~/.local/bin/smriti-uninstall`
 - `~/.local/share/smriti/`
 - `~/.local/share/applications/smriti.desktop`
+- `~/.local/share/icons/hicolor/*/apps/smriti.png`
 
-The desktop entry uses `smriti_logo.png` as its launcher icon.
+The desktop entry uses the themed `smriti` icon installed into `hicolor`.
 
 If `~/.local/bin` is not already on your `PATH`, the installer appends it to `~/.bashrc`.
+
+## Uninstall
+
+To remove the local user install:
+
+```bash
+./uninstall.sh
+```
+
+If you installed it first, you can also run:
+
+```bash
+smriti-uninstall
+```
+
+This removes the local command, desktop entry, themed icons, and the installed app files under `~/.local/share/smriti/`.
+If `install.sh` added `~/.local/bin` to your `PATH`, the uninstaller removes that exact block from `~/.bashrc`.
 
 ## Recording behavior
 

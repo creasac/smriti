@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import os
 import queue
 import re
@@ -20,6 +21,11 @@ try:
     import tkinter as tk
 except ImportError:  # pragma: no cover - depends on local system packages.
     tk = None
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - depends on local system packages.
+    Image = None
 
 SIZE_PATTERN = re.compile(r"^\d+x\d+$")
 
@@ -153,6 +159,45 @@ def find_app_icon_path() -> Path | None:
     if icon_path.exists():
         return icon_path
     return None
+
+
+def find_app_class_name() -> str:
+    override = os.environ.get("SMRITI_WM_CLASS", "").strip()
+    if override:
+        return override
+    return "smriti"
+
+
+def detect_icon_content_box(icon_path: Path, width: int, height: int) -> tuple[int, int, int, int]:
+    if Image is None:
+        return (0, 0, width, height)
+
+    try:
+        with Image.open(icon_path) as image:
+            alpha_box = image.convert("RGBA").getchannel("A").getbbox()
+    except Exception:
+        return (0, 0, width, height)
+
+    if alpha_box is None:
+        return (0, 0, width, height)
+
+    left, top, right, bottom = alpha_box
+    content_width = right - left
+    content_height = bottom - top
+    square_size = max(content_width, content_height)
+
+    center_x = left + content_width / 2
+    center_y = top + content_height / 2
+
+    square_left = max(0, math.floor(center_x - square_size / 2))
+    square_top = max(0, math.floor(center_y - square_size / 2))
+    square_right = min(width, square_left + square_size)
+    square_bottom = min(height, square_top + square_size)
+
+    square_left = max(0, square_right - square_size)
+    square_top = max(0, square_bottom - square_size)
+
+    return (square_left, square_top, square_right, square_bottom)
 
 
 def read_pipe(pipe: object) -> str:
@@ -848,7 +893,8 @@ class RecorderApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.icon_image: tk.PhotoImage | None = None
+        self.icon_source_image: tk.PhotoImage | None = None
+        self.icon_images: list[tk.PhotoImage] = []
         self.root.title("smriti")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -866,10 +912,52 @@ class RecorderApp:
         if icon_path is None:
             return
         try:
-            self.icon_image = tk.PhotoImage(file=str(icon_path))
-            self.root.iconphoto(True, self.icon_image)
+            self.icon_source_image = tk.PhotoImage(file=str(icon_path), master=self.root)
+            source = self.icon_source_image
+            width = source.width()
+            height = source.height()
+            content_box = detect_icon_content_box(icon_path, width, height)
+            content_width = content_box[2] - content_box[0]
+            content_height = content_box[3] - content_box[1]
+
+            # X11 stores Tk icons in _NET_WM_ICON. Sending the full source image
+            # can exceed server request limits when the asset is very large.
+            # Tk recommends providing a small set of icon sizes, with the larger
+            # one first, so window managers can pick an appropriate variant.
+            variants: list[tk.PhotoImage] = []
+            for target_size in (128, 32):
+                x_scale = max(1, math.ceil(content_width / target_size))
+                y_scale = max(1, math.ceil(content_height / target_size))
+                variant = tk.PhotoImage(master=self.root)
+                variant.tk.call(
+                    str(variant),
+                    "copy",
+                    str(source),
+                    "-from",
+                    content_box[0],
+                    content_box[1],
+                    content_box[2],
+                    content_box[3],
+                    "-shrink",
+                    "-subsample",
+                    x_scale,
+                    y_scale,
+                )
+                if any(
+                    existing.width() == variant.width() and existing.height() == variant.height()
+                    for existing in variants
+                ):
+                    continue
+                variants.append(variant)
+
+            if not variants:
+                variants = [source]
+
+            self.icon_images = variants
+            self.root.iconphoto(True, *self.icon_images)
         except tk.TclError:
-            self.icon_image = None
+            self.icon_source_image = None
+            self.icon_images = []
 
     def _build_ui(self) -> None:
         self.root.configure(bg="#f2efe7")
@@ -1119,7 +1207,7 @@ def launch_gui() -> int:
         print("tkinter is required to run the smriti GUI.", file=os.sys.stderr)
         return 1
 
-    root = tk.Tk(className="smriti")
+    root = tk.Tk(className=find_app_class_name())
     app = RecorderApp(root)
     root.mainloop()
     return 0
