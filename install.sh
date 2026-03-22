@@ -55,12 +55,13 @@ Version=1.0
 Type=Application
 Name=smriti
 Comment=Small X11 desktop recorder
-Exec=${BIN_DIR}/smriti
+Exec=sh -c "${BIN_DIR}/smriti &"
 Icon=smriti
 StartupWMClass=smriti
+X-GNOME-WMClass=smriti
 Terminal=false
 Categories=AudioVideo;Utility;
-StartupNotify=true
+StartupNotify=false
 EOF
 
 if [[ ! -f "${BASHRC}" ]]; then

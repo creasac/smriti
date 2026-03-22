@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import queue
+import socket
 import sys
 
 try:
@@ -39,6 +40,7 @@ else:
             self.root.title("smriti")
             self.root.resizable(False, False)
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+            self._set_window_manager_hints()
             self._set_window_icon()
 
             self.closing = False
@@ -47,6 +49,17 @@ else:
 
             self._build_ui()
             self._poll_events()
+
+        def _set_window_manager_hints(self) -> None:
+            try:
+                self.root.wm_client(socket.gethostname())
+            except tk.TclError:
+                pass
+            try:
+                if self.root.tk.call("tk", "windowingsystem") == "x11":
+                    self.root.wm_attributes("-type", "normal")
+            except tk.TclError:
+                pass
 
         def _set_window_icon(self) -> None:
             icon_path = find_app_icon_path()
