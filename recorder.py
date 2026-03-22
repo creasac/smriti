@@ -106,8 +106,8 @@ def pick_default_desktop_source(sources: list[str]) -> str | None:
 
 
 def default_output_path() -> Path:
-    timestamp = dt.datetime.now().strftime("%Y-%m-%d-time-%H-%M-%S")
-    return Path.home() / "Videos" / "smriti" / f"recording-{timestamp}.mp4"
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    return Path.home() / "Videos" / "smriti" / f"rec-{timestamp}.mp4"
 
 
 def next_available_output_path() -> Path:
@@ -155,11 +155,34 @@ def quote_concat_path(path: Path) -> str:
     return str(path).replace("'", r"'\''")
 
 
-def find_app_icon_path() -> Path | None:
-    icon_path = Path(__file__).resolve().with_name("smriti_logo.png")
-    if icon_path.exists():
-        return icon_path
+ASSET_FILENAMES = {
+    "record": "record.png",
+    "pause": "pause.png",
+    "resume": "resume.png",
+    "stop": "stop.png",
+    "webcam_on": "cam.png",
+    "webcam_off": "cam_off.png",
+    "mic_on": "mic.png",
+    "mic_off": "mic_off.png",
+    "app_icon": "smriti_logo.png",
+}
+
+
+def asset_search_roots() -> tuple[Path, ...]:
+    script_dir = Path(__file__).resolve().parent
+    return (script_dir / "assets", script_dir)
+
+
+def find_asset_path(filename: str) -> Path | None:
+    for root in asset_search_roots():
+        candidate = root / filename
+        if candidate.exists():
+            return candidate
     return None
+
+
+def find_app_icon_path() -> Path | None:
+    return find_asset_path(ASSET_FILENAMES["app_icon"])
 
 
 def find_app_class_name() -> str:
@@ -205,7 +228,10 @@ UI_THEME = {
     "window_bg": "#0b0f14",
     "panel_bg": "#131922",
     "panel_alt": "#1a222d",
-    "control_bg": "#101720",
+    "control_panel_bg": "#f5f5f5",
+    "control_panel_outline": "#d2d9e2",
+    "control_text": "#202833",
+    "control_text_muted": "#8d98a6",
     "outline": "#283343",
     "outline_soft": "#202a36",
     "text_primary": "#f3efe8",
@@ -373,6 +399,7 @@ class IconControl(tk.Frame):
         self.height = height
         self.label = label
         self.icon_kind = icon_kind
+        self.icon_images: dict[tuple[str, int], tk.PhotoImage | None] = {}
         self.enabled = True
         self.active = False
         self.hovered = False
@@ -445,37 +472,42 @@ class IconControl(tk.Frame):
         self.render()
 
     def _palette(self) -> tuple[str, str, str, str]:
-        fill = UI_THEME["control_bg"]
-        outline = UI_THEME["outline"]
-        icon_color = UI_THEME["text_secondary"]
-        label_color = UI_THEME["text_secondary"]
+        if self.variant == "transport":
+            fill = self.accent
+            outline = blend(self.accent, "#000000", 0.18)
+            icon_color = UI_THEME["control_text"]
+            label_color = UI_THEME["control_text"]
+
+            if self.hovered and self.enabled:
+                fill = blend(fill, "#ffffff", 0.06)
+            if self.pressed and self.enabled:
+                fill = blend(fill, "#000000", 0.10)
+            if not self.enabled:
+                fill = blend(fill, self.background, 0.40)
+                outline = blend(outline, self.background, 0.34)
+                icon_color = UI_THEME["control_text_muted"]
+                label_color = UI_THEME["control_text_muted"]
+
+            return fill, outline, icon_color, label_color
+
+        fill = self.background
+        outline = UI_THEME["control_panel_outline"]
+        icon_color = UI_THEME["control_text"]
+        label_color = UI_THEME["control_text"]
 
         if self.active:
-            tint = 0.24 if self.variant == "transport" else 0.18
-            fill = blend(fill, self.accent, tint)
-            outline = blend(outline, self.accent, 0.45)
-            icon_color = UI_THEME["text_primary"] if self.variant == "transport" else self.accent
-            label_color = UI_THEME["text_primary"]
+            outline = blend(outline, self.accent, 0.48)
+            icon_color = self.accent
+            label_color = self.accent
         elif self.hovered and self.enabled:
-            fill = blend(fill, "#ffffff", 0.05)
-            outline = blend(outline, "#ffffff", 0.08)
-            icon_color = UI_THEME["text_primary"]
-            label_color = UI_THEME["text_primary"]
-
-        if self.pressed and self.enabled:
-            fill = blend(fill, "#000000", 0.14)
+            outline = blend(outline, UI_THEME["control_text"], 0.18)
 
         if not self.enabled:
-            if self.active:
-                fill = blend(fill, self.background, 0.15)
-                outline = blend(outline, self.background, 0.12)
-                icon_color = blend(icon_color, self.background, 0.10)
-                label_color = blend(label_color, self.background, 0.10)
-            else:
-                fill = blend(fill, self.background, 0.40)
-                outline = blend(outline, self.background, 0.30)
-                icon_color = UI_THEME["text_muted"]
-                label_color = UI_THEME["text_muted"]
+            outline = blend(outline, self.background, 0.36)
+            icon_color = UI_THEME["control_text_muted"]
+            label_color = UI_THEME["control_text_muted"]
+        elif self.pressed:
+            outline = blend(outline, "#000000", 0.12)
 
         return fill, outline, icon_color, label_color
 
@@ -612,13 +644,84 @@ class IconControl(tk.Frame):
             capstyle=tk.ROUND,
         )
 
+    def _asset_icon_name(self) -> str | None:
+        if self.icon_kind == "record":
+            return ASSET_FILENAMES["record"]
+        if self.icon_kind == "pause":
+            return ASSET_FILENAMES["pause"]
+        if self.icon_kind == "resume":
+            return ASSET_FILENAMES["resume"]
+        if self.icon_kind == "stop":
+            return ASSET_FILENAMES["stop"]
+        if self.icon_kind == "webcam":
+            return ASSET_FILENAMES["webcam_on"] if self.active else ASSET_FILENAMES["webcam_off"]
+        if self.icon_kind == "mic":
+            return ASSET_FILENAMES["mic_on"] if self.active else ASSET_FILENAMES["mic_off"]
+        return None
+
+    def _load_asset_icon(self, filename: str, size: int) -> tk.PhotoImage | None:
+        cache_key = (filename, size)
+        if cache_key in self.icon_images:
+            return self.icon_images[cache_key]
+
+        icon_path = find_asset_path(filename)
+        if icon_path is None:
+            self.icon_images[cache_key] = None
+            return None
+
+        try:
+            source = tk.PhotoImage(file=str(icon_path), master=self)
+            width = source.width()
+            height = source.height()
+            content_box = detect_icon_content_box(icon_path, width, height)
+            cropped = source
+            if content_box != (0, 0, width, height):
+                cropped = tk.PhotoImage(master=self)
+                cropped.tk.call(
+                    str(cropped),
+                    "copy",
+                    str(source),
+                    "-from",
+                    content_box[0],
+                    content_box[1],
+                    content_box[2],
+                    content_box[3],
+                    "-shrink",
+                )
+
+            source_size = max(1, cropped.width(), cropped.height())
+            if source_size == size:
+                image = cropped
+            else:
+                divisor = math.gcd(source_size, size)
+                zoom = max(1, size // divisor)
+                subsample = max(1, source_size // divisor)
+                image = cropped.zoom(zoom, zoom)
+                if subsample > 1:
+                    image = image.subsample(subsample, subsample)
+
+            self.icon_images[cache_key] = image
+            return image
+        except tk.TclError:
+            self.icon_images[cache_key] = None
+            return None
+
     def _draw_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        asset_icon_name = self._asset_icon_name()
+        if asset_icon_name is not None:
+            asset_icon = self._load_asset_icon(asset_icon_name, round(size))
+            if asset_icon is not None:
+                self.canvas.create_image(cx, cy, image=asset_icon)
+                return
+
         if self.icon_kind == "record":
             self._draw_record_icon(cx, cy, size, color)
         elif self.icon_kind == "play":
             self._draw_play_icon(cx, cy, size, color)
         elif self.icon_kind == "pause":
             self._draw_pause_icon(cx, cy, size, color)
+        elif self.icon_kind in {"play", "resume"}:
+            self._draw_play_icon(cx, cy, size, color)
         elif self.icon_kind == "stop":
             self._draw_stop_icon(cx, cy, size, color)
         elif self.icon_kind == "webcam":
@@ -640,25 +743,22 @@ class IconControl(tk.Frame):
             fill=fill,
             outline=outline,
         )
-        self.canvas.create_line(
-            radius,
-            9,
-            self.width - radius,
-            9,
-            fill=blend(fill, "#ffffff", 0.20),
-            width=1,
-        )
 
-        icon_y = 26 if self.variant == "transport" else 25
-        icon_size = 28 if self.variant == "transport" else 26
+        icon_only = not self.label
+        icon_y = self.height / 2 if icon_only else (26 if self.variant == "transport" else 25)
+        if icon_only:
+            icon_size = 34 if self.variant == "transport" else 30
+        else:
+            icon_size = 30 if self.variant == "transport" else 28
         self._draw_icon(self.width / 2, icon_y, icon_size, icon_color)
-        self.canvas.create_text(
-            self.width / 2,
-            self.height - 18,
-            text=self.label,
-            font=("TkDefaultFont", 9, "bold"),
-            fill=label_color,
-        )
+        if self.label:
+            self.canvas.create_text(
+                self.width / 2,
+                self.height - 18,
+                text=self.label,
+                font=("TkDefaultFont", 9, "bold"),
+                fill=label_color,
+            )
 
         cursor = "hand2" if self.enabled and self.command is not None else "arrow"
         self.canvas.configure(cursor=cursor)
@@ -1442,24 +1542,24 @@ class RecorderApp:
 
         self.controls_card = tk.Frame(
             self.panel,
-            bg=theme["panel_alt"],
+            bg=theme["control_panel_bg"],
             padx=12,
             pady=12,
             highlightthickness=1,
-            highlightbackground=theme["outline_soft"],
+            highlightbackground=theme["control_panel_outline"],
         )
         self.controls_card.pack(fill="x")
 
-        self.controls_row = tk.Frame(self.controls_card, bg=theme["panel_alt"])
+        self.controls_row = tk.Frame(self.controls_card, bg=theme["control_panel_bg"])
         self.controls_row.pack()
 
         self.webcam_button = IconControl(
             self.controls_row,
-            label="Camera",
+            label="",
             icon_kind="webcam",
             command=self.on_toggle_webcam,
             accent=theme["accent_toggle"],
-            background=theme["panel_alt"],
+            background=theme["control_panel_bg"],
             variant="toggle",
             width=78,
             height=72,
@@ -1468,11 +1568,11 @@ class RecorderApp:
 
         self.mic_button = IconControl(
             self.controls_row,
-            label="Mic",
+            label="",
             icon_kind="mic",
             command=self.on_toggle_mic,
             accent=theme["accent_toggle"],
-            background=theme["panel_alt"],
+            background=theme["control_panel_bg"],
             variant="toggle",
             width=78,
             height=72,
@@ -1483,121 +1583,34 @@ class RecorderApp:
             self.controls_row,
             width=1,
             height=44,
-            bg=theme["outline_soft"],
+            bg=theme["control_panel_outline"],
         )
         self.controls_divider.pack(side="left", padx=(0, 12), pady=14)
 
         self.start_button = IconControl(
             self.controls_row,
-            label="Record",
+            label="",
             icon_kind="record",
-            command=self.on_start,
+            command=self.on_primary_action,
             accent=theme["accent_record"],
-            background=theme["panel_alt"],
+            background=theme["control_panel_bg"],
             variant="transport",
             width=84,
             height=72,
         )
-        self.start_button.pack(side="left", padx=(0, 8))
-
-        self.pause_button = IconControl(
-            self.controls_row,
-            label="Pause",
-            icon_kind="pause",
-            command=self.on_pause,
-            accent=theme["accent_pause"],
-            background=theme["panel_alt"],
-            variant="transport",
-            width=78,
-            height=72,
-        )
-        self.pause_button.pack(side="left", padx=(0, 8))
-
-        self.stop_button = IconControl(
-            self.controls_row,
-            label="Stop",
-            icon_kind="stop",
-            command=self.on_stop,
-            accent=theme["accent_stop"],
-            background=theme["panel_alt"],
-            variant="transport",
-            width=78,
-            height=72,
-        )
-        self.stop_button.pack(side="left")
-
-        self.details = tk.Frame(self.panel, bg=theme["panel_bg"])
-        self.details.pack(fill="x", pady=(10, 0))
-
-        self.details_card = tk.Frame(
-            self.details,
-            bg=theme["panel_alt"],
-            padx=14,
-            pady=14,
-            highlightthickness=1,
-            highlightbackground=theme["outline_soft"],
-        )
-        self.details_card.pack(fill="x")
-
-        self.status_label = tk.Label(
-            self.details_card,
-            text="Checking environment...",
-            anchor="w",
-            justify="left",
-            font=("TkDefaultFont", 10, "bold"),
-            bg=theme["panel_alt"],
-            fg=theme["text_primary"],
-            wraplength=420,
-        )
-        self.status_label.pack(fill="x")
-
-        self.metrics_row = tk.Frame(self.details_card, bg=theme["panel_alt"])
-        self.metrics_row.pack(fill="x", pady=(12, 0))
-
-        self.audio_badge = StatusBadge(
-            self.metrics_row,
-            width=138,
-            height=30,
-            background=theme["panel_alt"],
-        )
-        self.audio_badge.pack(side="left", padx=(0, 8))
-
-        self.preview_badge = StatusBadge(
-            self.metrics_row,
-            width=128,
-            height=30,
-            background=theme["panel_alt"],
-        )
-        self.preview_badge.pack(side="left")
-
-        self.output_heading = tk.Label(
-            self.details_card,
-            text="OUTPUT",
-            anchor="w",
-            font=("TkDefaultFont", 8, "bold"),
-            bg=theme["panel_alt"],
-            fg=theme["text_muted"],
-        )
-        self.output_heading.pack(fill="x", pady=(14, 4))
+        self.start_button.pack(side="left")
 
         self.output_label = tk.Label(
-            self.details_card,
-            text="Waiting for a recording",
+            self.panel,
+            text="",
             anchor="w",
             justify="left",
             font=("TkFixedFont", 9),
-            bg=theme["panel_alt"],
+            bg=theme["panel_bg"],
             fg=theme["text_secondary"],
             wraplength=420,
         )
-        self.output_label.pack(fill="x")
-
-    def _metric_badge_palette(self, active: bool) -> tuple[str, str, str, str]:
-        accent = UI_THEME["accent_toggle"] if active else UI_THEME["accent_idle"]
-        fill = blend(UI_THEME["panel_alt"], accent, 0.16 if active else 0.10)
-        outline = blend(UI_THEME["outline_soft"], accent, 0.34 if active else 0.18)
-        text_color = UI_THEME["text_primary"] if active else UI_THEME["text_secondary"]
-        return fill, outline, text_color, accent
+        self.output_visible = False
 
     def on_toggle_webcam(self) -> None:
         if not self.state or self.state.busy:
@@ -1611,6 +1624,14 @@ class RecorderApp:
 
     def on_start(self) -> None:
         if not self.state or self.state.busy:
+            return
+        self.controller.send("start")
+
+    def on_primary_action(self) -> None:
+        if not self.state or self.state.busy:
+            return
+        if self.state.mode in {"recording", "paused"}:
+            self.controller.send("stop")
             return
         self.controller.send("start")
 
@@ -1629,11 +1650,8 @@ class RecorderApp:
             return
         self.closing = True
         self.start_button.set_visual_state(enabled=False)
-        self.pause_button.set_visual_state(enabled=False)
-        self.stop_button.set_visual_state(enabled=False)
         self.webcam_button.set_visual_state(enabled=False)
         self.mic_button.set_visual_state(enabled=False)
-        self.status_label.configure(text="Closing smriti and finalizing any active recording...")
         self.controller.send("shutdown")
         self._wait_for_shutdown()
 
@@ -1658,80 +1676,38 @@ class RecorderApp:
         self.state = ControllerState(**raw_state)
 
         state = self.state
-        self.status_label.configure(text=state.status)
-
-        current_output = state.current_output or state.last_output
-        if current_output:
-            self.output_label.configure(text=current_output)
-        else:
-            self.output_label.configure(text="Waiting for a recording")
 
         controls_disabled = state.busy or self.closing
         can_record = state.ffmpeg_available and not controls_disabled
 
-        audio_fill, audio_outline, audio_text_color, audio_dot = self._metric_badge_palette(state.desktop_audio_available)
-        self.audio_badge.set_badge(
-            text="Desktop audio" if state.desktop_audio_available else "Silent capture",
-            fill=audio_fill,
-            outline=audio_outline,
-            text_color=audio_text_color,
-            dot=audio_dot,
-        )
-
-        preview_fill, preview_outline, preview_text_color, preview_dot = self._metric_badge_palette(
-            state.webcam_preview_running
-        )
-        self.preview_badge.set_badge(
-            text="Preview live" if state.webcam_preview_running else "Preview off",
-            fill=preview_fill,
-            outline=preview_outline,
-            text_color=preview_text_color,
-            dot=preview_dot,
-        )
-
-        if state.mode == "paused":
-            start_icon = "play"
-            start_label = "Resume"
-            start_active = False
-        elif state.mode == "recording":
-            start_icon = "record"
-            start_label = "Live"
-            start_active = True
-        else:
-            start_icon = "record"
-            start_label = "Record"
-            start_active = False
-
         self.start_button.set_visual_state(
-            label=start_label,
-            icon_kind=start_icon,
-            active=start_active,
-            enabled=can_record and state.mode != "recording",
-        )
-        self.pause_button.set_visual_state(
-            label="Pause",
-            icon_kind="pause",
-            active=state.mode == "paused",
-            enabled=not controls_disabled and state.mode == "recording",
-        )
-        self.stop_button.set_visual_state(
-            label="Stop",
-            icon_kind="stop",
-            enabled=not controls_disabled and state.mode in {"recording", "paused"},
+            label="",
+            icon_kind="stop" if state.mode in {"recording", "paused"} else "record",
+            enabled=(not controls_disabled and state.mode in {"recording", "paused"}) or can_record,
             active=False,
         )
         self.webcam_button.set_visual_state(
-            label="Camera",
+            label="",
             icon_kind="webcam",
             active=state.webcam_enabled,
             enabled=not controls_disabled,
         )
         self.mic_button.set_visual_state(
-            label="Mic",
+            label="",
             icon_kind="mic",
             active=state.mic_enabled,
             enabled=not controls_disabled,
         )
+
+        output_path = state.last_output if state.mode == "idle" and state.last_output else ""
+        if output_path:
+            self.output_label.configure(text=output_path)
+            if not self.output_visible:
+                self.output_label.pack(fill="x", pady=(10, 0))
+                self.output_visible = True
+        elif self.output_visible:
+            self.output_label.pack_forget()
+            self.output_visible = False
 
 
 def launch_gui() -> int:

@@ -10,16 +10,16 @@ BASHRC="${HOME}/.bashrc"
 PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 PATH_MARKER="${INSTALL_DIR}/.path_modified"
 
-mkdir -p "${INSTALL_DIR}" "${BIN_DIR}" "${APPLICATIONS_DIR}"
+mkdir -p "${INSTALL_DIR}" "${INSTALL_DIR}/assets" "${BIN_DIR}" "${APPLICATIONS_DIR}"
 
 install -m 755 "${SCRIPT_DIR}/recorder.py" "${INSTALL_DIR}/recorder.py"
 install -m 755 "${SCRIPT_DIR}/smriti" "${INSTALL_DIR}/smriti"
 install -m 755 "${SCRIPT_DIR}/uninstall.sh" "${INSTALL_DIR}/uninstall.sh"
-install -m 644 "${SCRIPT_DIR}/smriti_logo.png" "${INSTALL_DIR}/smriti_logo.png"
+install -m 644 "${SCRIPT_DIR}/assets/"*.png "${INSTALL_DIR}/assets/"
 ln -sfn "${INSTALL_DIR}/smriti" "${BIN_DIR}/smriti"
 ln -sfn "${INSTALL_DIR}/uninstall.sh" "${BIN_DIR}/smriti-uninstall"
 
-python3 - "${SCRIPT_DIR}/smriti_logo.png" "${ICON_THEME_DIR}" <<'PY'
+python3 - "${SCRIPT_DIR}/assets/smriti_logo.png" "${ICON_THEME_DIR}" <<'PY'
 from pathlib import Path
 import sys
 
