@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Callable
 
 try:
     import tkinter as tk
@@ -200,6 +201,469 @@ def detect_icon_content_box(icon_path: Path, width: int, height: int) -> tuple[i
     return (square_left, square_top, square_right, square_bottom)
 
 
+UI_THEME = {
+    "window_bg": "#0b0f14",
+    "panel_bg": "#131922",
+    "panel_alt": "#1a222d",
+    "control_bg": "#101720",
+    "outline": "#283343",
+    "outline_soft": "#202a36",
+    "text_primary": "#f3efe8",
+    "text_secondary": "#a5b1c2",
+    "text_muted": "#6f7b8b",
+    "accent_record": "#ff7a59",
+    "accent_pause": "#d3b06e",
+    "accent_stop": "#f19082",
+    "accent_toggle": "#74c4a0",
+    "accent_idle": "#7d8ca3",
+}
+
+
+def clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def blend(color_a: str, color_b: str, factor: float) -> str:
+    factor = clamp(factor, 0.0, 1.0)
+    a = color_a.lstrip("#")
+    b = color_b.lstrip("#")
+    channels = [
+        round(int(a[index : index + 2], 16) + (int(b[index : index + 2], 16) - int(a[index : index + 2], 16)) * factor)
+        for index in (0, 2, 4)
+    ]
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
+def draw_rounded_rectangle(
+    canvas: tk.Canvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    radius: float,
+    *,
+    fill: str,
+    outline: str,
+    width: int = 1,
+) -> int:
+    radius = clamp(radius, 0, min((x2 - x1) / 2, (y2 - y1) / 2))
+    points = [
+        x1 + radius,
+        y1,
+        x1 + radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + radius,
+        x2,
+        y1 + radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2,
+        x2 - radius,
+        y2,
+        x2 - radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - radius,
+        x1,
+        y2 - radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1,
+    ]
+    return canvas.create_polygon(
+        points,
+        smooth=True,
+        splinesteps=32,
+        fill=fill,
+        outline=outline,
+        width=width,
+    )
+
+
+class StatusBadge(tk.Frame):
+    def __init__(self, master: tk.Misc, *, width: int, height: int, background: str) -> None:
+        super().__init__(master, bg=background)
+        self._width = width
+        self._height = height
+        self._text = ""
+        self._fill = UI_THEME["panel_alt"]
+        self._outline = UI_THEME["outline"]
+        self._text_color = UI_THEME["text_secondary"]
+        self._dot = UI_THEME["accent_idle"]
+        self.canvas = tk.Canvas(
+            self,
+            width=width,
+            height=height,
+            bg=background,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.canvas.pack()
+        self.render()
+
+    def set_badge(self, *, text: str, fill: str, outline: str, text_color: str, dot: str) -> None:
+        self._text = text
+        self._fill = fill
+        self._outline = outline
+        self._text_color = text_color
+        self._dot = dot
+        self.render()
+
+    def render(self) -> None:
+        self.canvas.delete("all")
+        draw_rounded_rectangle(
+            self.canvas,
+            1,
+            1,
+            self._width - 1,
+            self._height - 1,
+            14,
+            fill=self._fill,
+            outline=self._outline,
+        )
+        self.canvas.create_oval(14, 11, 20, 17, fill=self._dot, outline="")
+        self.canvas.create_text(
+            self._width / 2 + 8,
+            self._height / 2,
+            text=self._text,
+            font=("TkDefaultFont", 9, "bold"),
+            fill=self._text_color,
+        )
+
+
+class IconControl(tk.Frame):
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        label: str,
+        icon_kind: str,
+        command: Callable[[], None] | None,
+        accent: str,
+        background: str,
+        variant: str = "toggle",
+        width: int,
+        height: int,
+    ) -> None:
+        super().__init__(master, bg=background)
+        self.command = command
+        self.accent = accent
+        self.background = background
+        self.variant = variant
+        self.width = width
+        self.height = height
+        self.label = label
+        self.icon_kind = icon_kind
+        self.enabled = True
+        self.active = False
+        self.hovered = False
+        self.pressed = False
+        self.canvas = tk.Canvas(
+            self,
+            width=width,
+            height=height,
+            bg=background,
+            bd=0,
+            highlightthickness=0,
+        )
+        self.canvas.pack()
+        self._bind_events()
+        self.render()
+
+    def _bind_events(self) -> None:
+        for sequence, handler in (
+            ("<Enter>", self._on_enter),
+            ("<Leave>", self._on_leave),
+            ("<ButtonPress-1>", self._on_press),
+            ("<ButtonRelease-1>", self._on_release),
+        ):
+            self.canvas.bind(sequence, handler)
+
+    def _on_enter(self, _event: tk.Event[tk.Misc]) -> None:
+        self.hovered = True
+        self.render()
+
+    def _on_leave(self, _event: tk.Event[tk.Misc]) -> None:
+        self.hovered = False
+        self.pressed = False
+        self.render()
+
+    def _on_press(self, _event: tk.Event[tk.Misc]) -> None:
+        if not self.enabled or self.command is None:
+            return
+        self.pressed = True
+        self.render()
+
+    def _on_release(self, event: tk.Event[tk.Misc]) -> None:
+        should_fire = (
+            self.enabled
+            and self.command is not None
+            and self.pressed
+            and 0 <= event.x <= self.width
+            and 0 <= event.y <= self.height
+        )
+        self.pressed = False
+        self.render()
+        if should_fire:
+            self.command()
+
+    def set_visual_state(
+        self,
+        *,
+        label: str | None = None,
+        icon_kind: str | None = None,
+        enabled: bool | None = None,
+        active: bool | None = None,
+    ) -> None:
+        if label is not None:
+            self.label = label
+        if icon_kind is not None:
+            self.icon_kind = icon_kind
+        if enabled is not None:
+            self.enabled = enabled
+        if active is not None:
+            self.active = active
+        self.render()
+
+    def _palette(self) -> tuple[str, str, str, str]:
+        fill = UI_THEME["control_bg"]
+        outline = UI_THEME["outline"]
+        icon_color = UI_THEME["text_secondary"]
+        label_color = UI_THEME["text_secondary"]
+
+        if self.active:
+            tint = 0.24 if self.variant == "transport" else 0.18
+            fill = blend(fill, self.accent, tint)
+            outline = blend(outline, self.accent, 0.45)
+            icon_color = UI_THEME["text_primary"] if self.variant == "transport" else self.accent
+            label_color = UI_THEME["text_primary"]
+        elif self.hovered and self.enabled:
+            fill = blend(fill, "#ffffff", 0.05)
+            outline = blend(outline, "#ffffff", 0.08)
+            icon_color = UI_THEME["text_primary"]
+            label_color = UI_THEME["text_primary"]
+
+        if self.pressed and self.enabled:
+            fill = blend(fill, "#000000", 0.14)
+
+        if not self.enabled:
+            if self.active:
+                fill = blend(fill, self.background, 0.15)
+                outline = blend(outline, self.background, 0.12)
+                icon_color = blend(icon_color, self.background, 0.10)
+                label_color = blend(label_color, self.background, 0.10)
+            else:
+                fill = blend(fill, self.background, 0.40)
+                outline = blend(outline, self.background, 0.30)
+                icon_color = UI_THEME["text_muted"]
+                label_color = UI_THEME["text_muted"]
+
+        return fill, outline, icon_color, label_color
+
+    def _draw_record_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        radius = size * 0.28
+        if self.active:
+            ring = size * 0.52
+            self.canvas.create_oval(
+                cx - ring,
+                cy - ring,
+                cx + ring,
+                cy + ring,
+                outline=blend(self.accent, UI_THEME["panel_bg"], 0.20),
+                width=2,
+            )
+        self.canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill=color, outline="")
+
+    def _draw_play_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        half = size * 0.42
+        self.canvas.create_polygon(
+            cx - half * 0.5,
+            cy - half,
+            cx + half,
+            cy,
+            cx - half * 0.5,
+            cy + half,
+            fill=color,
+            outline="",
+        )
+
+    def _draw_pause_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        bar_width = size * 0.18
+        gap = size * 0.14
+        bar_height = size * 0.50
+        self.canvas.create_rectangle(
+            cx - gap - bar_width,
+            cy - bar_height,
+            cx - gap,
+            cy + bar_height,
+            fill=color,
+            outline="",
+        )
+        self.canvas.create_rectangle(
+            cx + gap,
+            cy - bar_height,
+            cx + gap + bar_width,
+            cy + bar_height,
+            fill=color,
+            outline="",
+        )
+
+    def _draw_stop_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        half = size * 0.35
+        self.canvas.create_rectangle(cx - half, cy - half, cx + half, cy + half, fill=color, outline="")
+
+    def _draw_webcam_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        body_width = size * 0.98
+        body_height = size * 0.54
+        x1 = cx - body_width / 2
+        y1 = cy - body_height / 2 + 2
+        x2 = cx + body_width / 2
+        y2 = cy + body_height / 2 + 2
+        draw_rounded_rectangle(
+            self.canvas,
+            x1,
+            y1,
+            x2,
+            y2,
+            size * 0.14,
+            fill="",
+            outline=color,
+            width=2,
+        )
+        tab_height = size * 0.16
+        self.canvas.create_rectangle(
+            x1 + size * 0.18,
+            y1 - tab_height,
+            x1 + size * 0.52,
+            y1 + size * 0.02,
+            fill=color,
+            outline=color,
+        )
+        lens_radius = size * 0.22
+        self.canvas.create_oval(
+            cx - lens_radius,
+            cy - lens_radius + 2,
+            cx + lens_radius,
+            cy + lens_radius + 2,
+            outline=color,
+            width=2,
+        )
+        self.canvas.create_oval(cx - 2, cy, cx + 2, cy + 4, fill=color, outline="")
+
+    def _draw_mic_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        head_width = size * 0.24
+        head_height = size * 0.38
+        draw_rounded_rectangle(
+            self.canvas,
+            cx - head_width,
+            cy - head_height - 4,
+            cx + head_width,
+            cy + head_height * 0.18 - 4,
+            head_width,
+            fill=color,
+            outline=color,
+        )
+        self.canvas.create_line(
+            cx,
+            cy + head_height * 0.18 - 4,
+            cx,
+            cy + size * 0.42,
+            fill=color,
+            width=2,
+            capstyle=tk.ROUND,
+        )
+        self.canvas.create_arc(
+            cx - size * 0.42,
+            cy - size * 0.14,
+            cx + size * 0.42,
+            cy + size * 0.56,
+            start=200,
+            extent=140,
+            style=tk.ARC,
+            outline=color,
+            width=2,
+        )
+        self.canvas.create_line(
+            cx - size * 0.28,
+            cy + size * 0.48,
+            cx + size * 0.28,
+            cy + size * 0.48,
+            fill=color,
+            width=2,
+            capstyle=tk.ROUND,
+        )
+
+    def _draw_icon(self, cx: float, cy: float, size: float, color: str) -> None:
+        if self.icon_kind == "record":
+            self._draw_record_icon(cx, cy, size, color)
+        elif self.icon_kind == "play":
+            self._draw_play_icon(cx, cy, size, color)
+        elif self.icon_kind == "pause":
+            self._draw_pause_icon(cx, cy, size, color)
+        elif self.icon_kind == "stop":
+            self._draw_stop_icon(cx, cy, size, color)
+        elif self.icon_kind == "webcam":
+            self._draw_webcam_icon(cx, cy, size, color)
+        elif self.icon_kind == "mic":
+            self._draw_mic_icon(cx, cy, size, color)
+
+    def render(self) -> None:
+        fill, outline, icon_color, label_color = self._palette()
+        self.canvas.delete("all")
+        radius = 22 if self.variant == "transport" else 18
+        draw_rounded_rectangle(
+            self.canvas,
+            1,
+            1,
+            self.width - 1,
+            self.height - 1,
+            radius,
+            fill=fill,
+            outline=outline,
+        )
+        self.canvas.create_line(
+            radius,
+            9,
+            self.width - radius,
+            9,
+            fill=blend(fill, "#ffffff", 0.20),
+            width=1,
+        )
+
+        icon_y = 26 if self.variant == "transport" else 25
+        icon_size = 28 if self.variant == "transport" else 26
+        self._draw_icon(self.width / 2, icon_y, icon_size, icon_color)
+        self.canvas.create_text(
+            self.width / 2,
+            self.height - 18,
+            text=self.label,
+            font=("TkDefaultFont", 9, "bold"),
+            fill=label_color,
+        )
+
+        cursor = "hand2" if self.enabled and self.command is not None else "arrow"
+        self.canvas.configure(cursor=cursor)
+
+
 def read_pipe(pipe: object) -> str:
     if pipe is None:
         return ""
@@ -323,17 +787,9 @@ class WebcamWindowController:
         if self.process.poll() is None:
             return True
 
-        stderr_output = read_pipe(self.process.stderr)
-        exited_with = self.process.returncode
+        if self.process.stderr:
+            self.process.stderr.close()
         self.process = None
-        if exited_with == 0:
-            try:
-                self.start()
-                return True
-            except RuntimeError:
-                return False
-        if stderr_output:
-            return False
         return False
 
     def stop(self) -> None:
@@ -538,12 +994,17 @@ class RecorderController:
                 self._publish_state()
 
     def _poll_background_processes(self) -> None:
+        state_changed = False
         preview_running = False
         if self.state.webcam_enabled:
             preview_running = self.webcam_controller.ensure_running()
             if not preview_running and self.state.webcam_enabled:
-                self.state.status = "Webcam preview is not running."
-        self.state.webcam_preview_running = preview_running
+                self.state.webcam_enabled = False
+                self.state.status = "Webcam preview disabled."
+                state_changed = True
+        if self.state.webcam_preview_running != preview_running:
+            self.state.webcam_preview_running = preview_running
+            state_changed = True
 
         if self.active_segment and self.active_segment.process.poll() is not None:
             kept, message = self._collect_finished_segment()
@@ -557,6 +1018,9 @@ class RecorderController:
                 self.state.status = message or "Recording stopped unexpectedly."
                 self._clear_session_files(keep_segments=kept)
                 self.session = None
+            state_changed = True
+
+        if state_changed:
             self._publish_state()
 
     def _handle_toggle_webcam(self, enabled: bool) -> None:
@@ -900,7 +1364,7 @@ class RecorderApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._set_window_icon()
 
-        self.expanded = True
+        self.closing = False
         self.state: ControllerState | None = None
         self.controller = RecorderController(AppConfig())
 
@@ -960,146 +1424,180 @@ class RecorderApp:
             self.icon_images = []
 
     def _build_ui(self) -> None:
-        self.root.configure(bg="#f2efe7")
+        theme = UI_THEME
+        self.root.configure(bg=theme["window_bg"])
 
-        self.shell = tk.Frame(self.root, bg="#f2efe7", padx=12, pady=12)
+        self.shell = tk.Frame(self.root, bg=theme["window_bg"], padx=14, pady=14)
         self.shell.pack(fill="both", expand=True)
 
-        self.toolbar = tk.Frame(self.shell, bg="#f2efe7")
-        self.toolbar.pack(fill="x")
-
-        self.arrow_button = tk.Button(
-            self.toolbar,
-            text="^",
-            width=3,
-            command=self.toggle_expanded,
-            bg="#ddd6c5",
-            relief=tk.RAISED,
+        self.panel = tk.Frame(
+            self.shell,
+            bg=theme["panel_bg"],
+            padx=14,
+            pady=14,
+            highlightthickness=1,
+            highlightbackground=theme["outline"],
         )
-        self.arrow_button.pack(side="left", padx=(0, 8))
+        self.panel.pack(fill="both", expand=True)
 
-        self.title_label = tk.Label(
-            self.toolbar,
-            text="smriti",
-            font=("TkDefaultFont", 12, "bold"),
-            bg="#f2efe7",
-            fg="#1f2933",
+        self.controls_card = tk.Frame(
+            self.panel,
+            bg=theme["panel_alt"],
+            padx=12,
+            pady=12,
+            highlightthickness=1,
+            highlightbackground=theme["outline_soft"],
         )
-        self.title_label.pack(side="left")
+        self.controls_card.pack(fill="x")
 
-        self.mode_label = tk.Label(
-            self.toolbar,
-            text="idle",
-            bg="#f2efe7",
-            fg="#5b6470",
-            padx=10,
-        )
-        self.mode_label.pack(side="right")
+        self.controls_row = tk.Frame(self.controls_card, bg=theme["panel_alt"])
+        self.controls_row.pack()
 
-        self.buttons = tk.Frame(self.shell, bg="#f2efe7", pady=10)
-        self.buttons.pack(fill="x")
-
-        self.webcam_button = tk.Button(
-            self.buttons,
-            text="Webcam Off",
-            width=12,
+        self.webcam_button = IconControl(
+            self.controls_row,
+            label="Camera",
+            icon_kind="webcam",
             command=self.on_toggle_webcam,
-            bg="#d8dee6",
+            accent=theme["accent_toggle"],
+            background=theme["panel_alt"],
+            variant="toggle",
+            width=78,
+            height=72,
         )
         self.webcam_button.pack(side="left", padx=(0, 8))
 
-        self.mic_button = tk.Button(
-            self.buttons,
-            text="Mic Off",
-            width=12,
+        self.mic_button = IconControl(
+            self.controls_row,
+            label="Mic",
+            icon_kind="mic",
             command=self.on_toggle_mic,
-            bg="#d8dee6",
+            accent=theme["accent_toggle"],
+            background=theme["panel_alt"],
+            variant="toggle",
+            width=78,
+            height=72,
         )
-        self.mic_button.pack(side="left", padx=(0, 8))
+        self.mic_button.pack(side="left", padx=(0, 12))
 
-        self.start_button = tk.Button(
-            self.buttons,
-            text="Start",
-            width=10,
+        self.controls_divider = tk.Frame(
+            self.controls_row,
+            width=1,
+            height=44,
+            bg=theme["outline_soft"],
+        )
+        self.controls_divider.pack(side="left", padx=(0, 12), pady=14)
+
+        self.start_button = IconControl(
+            self.controls_row,
+            label="Record",
+            icon_kind="record",
             command=self.on_start,
-            bg="#b9d8a7",
+            accent=theme["accent_record"],
+            background=theme["panel_alt"],
+            variant="transport",
+            width=84,
+            height=72,
         )
         self.start_button.pack(side="left", padx=(0, 8))
 
-        self.pause_button = tk.Button(
-            self.buttons,
-            text="Pause",
-            width=10,
+        self.pause_button = IconControl(
+            self.controls_row,
+            label="Pause",
+            icon_kind="pause",
             command=self.on_pause,
-            bg="#e8d08a",
+            accent=theme["accent_pause"],
+            background=theme["panel_alt"],
+            variant="transport",
+            width=78,
+            height=72,
         )
         self.pause_button.pack(side="left", padx=(0, 8))
 
-        self.stop_button = tk.Button(
-            self.buttons,
-            text="Stop",
-            width=10,
+        self.stop_button = IconControl(
+            self.controls_row,
+            label="Stop",
+            icon_kind="stop",
             command=self.on_stop,
-            bg="#e7a4a4",
+            accent=theme["accent_stop"],
+            background=theme["panel_alt"],
+            variant="transport",
+            width=78,
+            height=72,
         )
         self.stop_button.pack(side="left")
 
-        self.details = tk.Frame(self.shell, bg="#f2efe7")
-        self.details.pack(fill="x")
+        self.details = tk.Frame(self.panel, bg=theme["panel_bg"])
+        self.details.pack(fill="x", pady=(10, 0))
+
+        self.details_card = tk.Frame(
+            self.details,
+            bg=theme["panel_alt"],
+            padx=14,
+            pady=14,
+            highlightthickness=1,
+            highlightbackground=theme["outline_soft"],
+        )
+        self.details_card.pack(fill="x")
 
         self.status_label = tk.Label(
-            self.details,
+            self.details_card,
             text="Checking environment...",
             anchor="w",
             justify="left",
-            bg="#f2efe7",
-            fg="#1f2933",
+            font=("TkDefaultFont", 10, "bold"),
+            bg=theme["panel_alt"],
+            fg=theme["text_primary"],
             wraplength=420,
         )
-        self.status_label.pack(fill="x", pady=(4, 8))
+        self.status_label.pack(fill="x")
 
-        self.audio_label = tk.Label(
-            self.details,
-            text="Desktop audio: checking",
-            anchor="w",
-            bg="#f2efe7",
-            fg="#5b6470",
-        )
-        self.audio_label.pack(fill="x")
+        self.metrics_row = tk.Frame(self.details_card, bg=theme["panel_alt"])
+        self.metrics_row.pack(fill="x", pady=(12, 0))
 
-        self.preview_label = tk.Label(
-            self.details,
-            text="Webcam preview: off",
-            anchor="w",
-            bg="#f2efe7",
-            fg="#5b6470",
+        self.audio_badge = StatusBadge(
+            self.metrics_row,
+            width=138,
+            height=30,
+            background=theme["panel_alt"],
         )
-        self.preview_label.pack(fill="x", pady=(4, 0))
+        self.audio_badge.pack(side="left", padx=(0, 8))
+
+        self.preview_badge = StatusBadge(
+            self.metrics_row,
+            width=128,
+            height=30,
+            background=theme["panel_alt"],
+        )
+        self.preview_badge.pack(side="left")
+
+        self.output_heading = tk.Label(
+            self.details_card,
+            text="OUTPUT",
+            anchor="w",
+            font=("TkDefaultFont", 8, "bold"),
+            bg=theme["panel_alt"],
+            fg=theme["text_muted"],
+        )
+        self.output_heading.pack(fill="x", pady=(14, 4))
 
         self.output_label = tk.Label(
-            self.details,
-            text="Output: waiting for a recording",
+            self.details_card,
+            text="Waiting for a recording",
             anchor="w",
             justify="left",
-            bg="#f2efe7",
-            fg="#5b6470",
+            font=("TkFixedFont", 9),
+            bg=theme["panel_alt"],
+            fg=theme["text_secondary"],
             wraplength=420,
         )
-        self.output_label.pack(fill="x", pady=(8, 0))
+        self.output_label.pack(fill="x")
 
-    def toggle_expanded(self) -> None:
-        self.expanded = not self.expanded
-        if self.expanded:
-            self.details.pack(fill="x")
-            self.arrow_button.configure(text="^")
-        else:
-            self.details.pack_forget()
-            self.arrow_button.configure(text="v")
-
-    def set_expanded(self, expanded: bool) -> None:
-        if self.expanded == expanded:
-            return
-        self.toggle_expanded()
+    def _metric_badge_palette(self, active: bool) -> tuple[str, str, str, str]:
+        accent = UI_THEME["accent_toggle"] if active else UI_THEME["accent_idle"]
+        fill = blend(UI_THEME["panel_alt"], accent, 0.16 if active else 0.10)
+        outline = blend(UI_THEME["outline_soft"], accent, 0.34 if active else 0.18)
+        text_color = UI_THEME["text_primary"] if active else UI_THEME["text_secondary"]
+        return fill, outline, text_color, accent
 
     def on_toggle_webcam(self) -> None:
         if not self.state or self.state.busy:
@@ -1114,7 +1612,6 @@ class RecorderApp:
     def on_start(self) -> None:
         if not self.state or self.state.busy:
             return
-        self.set_expanded(False)
         self.controller.send("start")
 
     def on_pause(self) -> None:
@@ -1128,11 +1625,14 @@ class RecorderApp:
         self.controller.send("stop")
 
     def on_close(self) -> None:
-        self.start_button.configure(state=tk.DISABLED)
-        self.pause_button.configure(state=tk.DISABLED)
-        self.stop_button.configure(state=tk.DISABLED)
-        self.webcam_button.configure(state=tk.DISABLED)
-        self.mic_button.configure(state=tk.DISABLED)
+        if self.closing:
+            return
+        self.closing = True
+        self.start_button.set_visual_state(enabled=False)
+        self.pause_button.set_visual_state(enabled=False)
+        self.stop_button.set_visual_state(enabled=False)
+        self.webcam_button.set_visual_state(enabled=False)
+        self.mic_button.set_visual_state(enabled=False)
         self.status_label.configure(text="Closing smriti and finalizing any active recording...")
         self.controller.send("shutdown")
         self._wait_for_shutdown()
@@ -1158,48 +1658,80 @@ class RecorderApp:
         self.state = ControllerState(**raw_state)
 
         state = self.state
-        self.mode_label.configure(text=state.mode)
         self.status_label.configure(text=state.status)
-
-        desktop_audio_text = "Desktop audio: on" if state.desktop_audio_available else "Desktop audio: unavailable"
-        self.audio_label.configure(text=desktop_audio_text)
-
-        preview_text = "Webcam preview: on" if state.webcam_preview_running else "Webcam preview: off"
-        self.preview_label.configure(text=preview_text)
 
         current_output = state.current_output or state.last_output
         if current_output:
-            self.output_label.configure(text=f"Output: {current_output}")
+            self.output_label.configure(text=current_output)
         else:
-            self.output_label.configure(text="Output: waiting for a recording")
+            self.output_label.configure(text="Waiting for a recording")
 
-        webcam_bg = "#98c1a3" if state.webcam_enabled else "#d8dee6"
-        webcam_text = "Webcam On" if state.webcam_enabled else "Webcam Off"
-        self.webcam_button.configure(text=webcam_text, bg=webcam_bg)
+        controls_disabled = state.busy or self.closing
+        can_record = state.ffmpeg_available and not controls_disabled
 
-        mic_bg = "#98c1a3" if state.mic_enabled else "#d8dee6"
-        mic_text = "Mic On" if state.mic_enabled else "Mic Off"
-        self.mic_button.configure(text=mic_text, bg=mic_bg)
+        audio_fill, audio_outline, audio_text_color, audio_dot = self._metric_badge_palette(state.desktop_audio_available)
+        self.audio_badge.set_badge(
+            text="Desktop audio" if state.desktop_audio_available else "Silent capture",
+            fill=audio_fill,
+            outline=audio_outline,
+            text_color=audio_text_color,
+            dot=audio_dot,
+        )
+
+        preview_fill, preview_outline, preview_text_color, preview_dot = self._metric_badge_palette(
+            state.webcam_preview_running
+        )
+        self.preview_badge.set_badge(
+            text="Preview live" if state.webcam_preview_running else "Preview off",
+            fill=preview_fill,
+            outline=preview_outline,
+            text_color=preview_text_color,
+            dot=preview_dot,
+        )
 
         if state.mode == "paused":
-            start_text = "Resume"
+            start_icon = "play"
+            start_label = "Resume"
+            start_active = False
         elif state.mode == "recording":
-            start_text = "Recording"
+            start_icon = "record"
+            start_label = "Live"
+            start_active = True
         else:
-            start_text = "Start"
-        self.start_button.configure(text=start_text)
+            start_icon = "record"
+            start_label = "Record"
+            start_active = False
 
-        controls_disabled = state.busy
-        can_record = state.ffmpeg_available and not controls_disabled
-        self.start_button.configure(state=tk.NORMAL if can_record and state.mode != "recording" else tk.DISABLED)
-        self.pause_button.configure(
-            state=tk.NORMAL if not controls_disabled and state.mode == "recording" else tk.DISABLED
+        self.start_button.set_visual_state(
+            label=start_label,
+            icon_kind=start_icon,
+            active=start_active,
+            enabled=can_record and state.mode != "recording",
         )
-        self.stop_button.configure(
-            state=tk.NORMAL if not controls_disabled and state.mode in {"recording", "paused"} else tk.DISABLED
+        self.pause_button.set_visual_state(
+            label="Pause",
+            icon_kind="pause",
+            active=state.mode == "paused",
+            enabled=not controls_disabled and state.mode == "recording",
         )
-        self.webcam_button.configure(state=tk.NORMAL if not controls_disabled else tk.DISABLED)
-        self.mic_button.configure(state=tk.NORMAL if not controls_disabled else tk.DISABLED)
+        self.stop_button.set_visual_state(
+            label="Stop",
+            icon_kind="stop",
+            enabled=not controls_disabled and state.mode in {"recording", "paused"},
+            active=False,
+        )
+        self.webcam_button.set_visual_state(
+            label="Camera",
+            icon_kind="webcam",
+            active=state.webcam_enabled,
+            enabled=not controls_disabled,
+        )
+        self.mic_button.set_visual_state(
+            label="Mic",
+            icon_kind="mic",
+            active=state.mic_enabled,
+            enabled=not controls_disabled,
+        )
 
 
 def launch_gui() -> int:
