@@ -1,15 +1,19 @@
 # smriti
 
-Minimal X11 desktop recorder with a small control window.
+Minimal X11 desktop recorder with top-bar controls.
 
-It opens a GUI with:
+It opens a top-bar menu with:
 
-- `Webcam` toggle
+- `Start` and `Stop`
 - `Mic` toggle
-- `Start`, `Pause`, and `Stop`
+- `Camera` toggle
+- `Flip Camera` toggle
 - auto-saved MP4 recordings in `~/Videos/smriti/`
 
-The webcam preview is a separate draggable window. When it is visible on the desktop, it is captured in the recording. The control window can be collapsed with the arrow button, and starting a recording auto-collapses it.
+The webcam preview is a separate draggable window. When it is visible on the desktop, it is captured in the recording.
+
+`Mic`, `Camera`, and `Flip Camera` start enabled by default and can be deselected later.
+While recording, the tray indicator shows a running timer label next to the icon.
 
 ## Requirements
 
@@ -17,7 +21,8 @@ The webcam preview is a separate draggable window. When it is visible on the des
 - `ffmpeg`
 - `ffplay`
 - `pactl` for desktop audio and mic auto-detection
-- Python `tkinter`
+- GTK AppIndicator support (`python3-gi` + Ayatana AppIndicator) for the top-bar menu
+- Python `tkinter` for the fallback window UI
 
 ## Run
 
@@ -31,6 +36,12 @@ You can also run:
 
 ```bash
 python3 recorder.py
+```
+
+To force the original window UI instead of the top-bar menu:
+
+```bash
+SMRITI_UI=window ./smriti
 ```
 
 ## Install
@@ -82,6 +93,7 @@ If `install.sh` added `~/.local/bin` to your `PATH`, the uninstaller removes tha
 ## Notes
 
 - This is intentionally X11-focused.
-- The control window is part of the desktop, so if it is visible it can be recorded.
+- The top-bar controller avoids a separate floating window, but the tray icon and any open menu are still part of the desktop and can appear in recordings.
+- If the tray backend is unavailable, smriti falls back to the original small Tk window.
 - If desktop audio is not available, smriti records silent audio instead of failing.
 - If final merge fails after pause/resume or mic changes, the temporary segment files are kept and the app shows where they were left.

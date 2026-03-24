@@ -15,10 +15,12 @@ class AppConfig:
     fps: int = 30
     webcam_device: str = "/dev/video0"
     webcam_width: int = 320
-    webcam_flip_horizontal: bool = False
+    webcam_flip_horizontal: bool = True
     webcam_window_x: int = 20
     webcam_window_y: int = 20
     webcam_always_on_top: bool = True
+    default_webcam_enabled: bool = True
+    default_mic_enabled: bool = True
 
 
 @dataclass

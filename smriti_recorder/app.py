@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import socket
 import sys
@@ -18,6 +19,7 @@ from .desktop import (
     find_app_class_name,
     find_app_icon_path,
 )
+from .tray import launch_tray, tray_backend_available
 
 if tk is not None:
     from .ui import IconControl, UI_THEME
@@ -319,4 +321,14 @@ def launch_gui() -> int:
 
 
 def main() -> int:
+    preferred_ui = os.environ.get("SMRITI_UI", "").strip().lower()
+    if preferred_ui == "window":
+        return launch_gui()
+    if preferred_ui == "tray":
+        return launch_tray()
+
+    if tray_backend_available():
+        tray_result = launch_tray()
+        if tray_result == 0:
+            return 0
     return launch_gui()

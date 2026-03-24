@@ -236,7 +236,12 @@ class RecorderController:
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        self.state = ControllerState(status="Checking environment...")
+        self.state = ControllerState(
+            status="Checking environment...",
+            webcam_enabled=config.default_webcam_enabled,
+            webcam_flipped=config.webcam_flip_horizontal,
+            mic_enabled=config.default_mic_enabled,
+        )
         self.events: queue.Queue[dict[str, object]] = queue.Queue()
         self.commands: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.webcam_controller = WebcamWindowController(config)
@@ -247,6 +252,8 @@ class RecorderController:
         self._publish_state()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
+        if self.config.default_webcam_enabled:
+            self.send("toggle_webcam", True)
 
     def _refresh_capabilities(self) -> None:
         pulse_sources = get_pulse_sources()
