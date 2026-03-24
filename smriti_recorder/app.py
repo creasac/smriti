@@ -175,23 +175,11 @@ else:
                 command=self.on_primary_action,
                 accent=theme["accent_record"],
                 background=theme["control_panel_bg"],
-                variant="transport",
+                variant="toggle",
                 width=74,
                 height=68,
             )
             self.start_button.pack(side="left")
-
-            self.output_label = tk.Label(
-                self.root,
-                text="",
-                anchor="w",
-                justify="left",
-                font=("TkFixedFont", 9),
-                bg=theme["control_panel_bg"],
-                fg=theme["control_text"],
-                wraplength=280,
-            )
-            self.output_visible = False
 
         def on_toggle_webcam(self) -> None:
             if not self.state or self.state.busy:
@@ -291,15 +279,17 @@ else:
             self.state = ControllerState(**raw_state)
 
             state = self.state
-
+            is_stop_mode = state.mode in {"recording", "paused"}
             controls_disabled = state.busy or self.closing
             can_record = state.ffmpeg_available and not controls_disabled
 
             self.start_button.set_visual_state(
                 label="",
-                icon_kind="stop" if state.mode in {"recording", "paused"} else "record",
-                enabled=(not controls_disabled and state.mode in {"recording", "paused"}) or can_record,
+                icon_kind="stop" if is_stop_mode else "record",
+                enabled=(not controls_disabled and is_stop_mode) or can_record,
                 active=False,
+                accent=UI_THEME["accent_stop"] if is_stop_mode else UI_THEME["accent_record"],
+                variant="transport" if is_stop_mode else "toggle",
             )
             self.webcam_button.set_visual_state(
                 label="",
@@ -313,16 +303,6 @@ else:
                 active=state.mic_enabled,
                 enabled=not controls_disabled,
             )
-
-            output_path = state.last_output if state.mode == "idle" and state.last_output else ""
-            if output_path:
-                self.output_label.configure(text=output_path)
-                if not self.output_visible:
-                    self.output_label.pack(fill="x", pady=(10, 0))
-                    self.output_visible = True
-            elif self.output_visible:
-                self.output_label.pack_forget()
-                self.output_visible = False
 
 
 def launch_gui() -> int:

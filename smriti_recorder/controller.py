@@ -20,6 +20,7 @@ from .system import (
     pick_default_mic_source,
     quote_concat_path,
     read_pipe,
+    reveal_in_file_manager,
     summarize_error,
 )
 
@@ -450,10 +451,13 @@ class RecorderController:
         self.state.busy = True
         self.state.status = "Finalizing recording..."
         saved_path: Path | None = None
+        reveal_result: str | None = None
         try:
             if self.state.mode == "recording":
                 self._stop_current_segment()
             saved_path = self._finalize_session()
+            if saved_path:
+                reveal_result = reveal_in_file_manager(saved_path)
         finally:
             self.state.mode = "idle"
             self.state.current_output = ""
@@ -461,7 +465,12 @@ class RecorderController:
 
         self.state.last_output = str(saved_path) if saved_path else self.state.last_output
         if saved_path:
-            self.state.status = f"Saved recording: {saved_path}"
+            if reveal_result == "selected":
+                self.state.status = "Saved recording and selected it in your file manager."
+            elif reveal_result == "opened":
+                self.state.status = "Saved recording and opened its folder."
+            else:
+                self.state.status = "Saved recording, but couldn't open its folder."
         else:
             self.state.status = "Nothing was saved."
 

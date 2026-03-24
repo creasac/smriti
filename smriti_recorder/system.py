@@ -147,3 +147,75 @@ def summarize_error(prefix: str, stderr_output: str) -> str:
     if not lines:
         return prefix
     return f"{prefix} {lines[-1]}"
+
+
+def run_quiet(command: list[str], *, timeout: float = 5.0) -> bool:
+    """Run a command quietly and report whether it succeeded."""
+    if shutil.which(command[0]) is None:
+        return False
+    try:
+        proc = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def reveal_in_file_manager(path: Path) -> str | None:
+    path = path.expanduser()
+    if not path.is_absolute():
+        path = path.resolve()
+    directory = path if path.is_dir() else path.parent
+    path_uri = path.as_uri()
+    directory_uri = directory.as_uri()
+
+    if run_quiet(
+        [
+            "gdbus",
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.FileManager1",
+            "--object-path",
+            "/org/freedesktop/FileManager1",
+            "--method",
+            "org.freedesktop.FileManager1.ShowItems",
+            f"['{path_uri}']",
+            "",
+        ]
+    ):
+        return "selected"
+
+    if run_quiet(["nautilus", "--select", str(path)]):
+        return "selected"
+
+    if run_quiet(
+        [
+            "gdbus",
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.FileManager1",
+            "--object-path",
+            "/org/freedesktop/FileManager1",
+            "--method",
+            "org.freedesktop.FileManager1.ShowFolders",
+            f"['{directory_uri}']",
+            "",
+        ]
+    ):
+        return "opened"
+
+    if run_quiet(["gio", "open", str(directory)]):
+        return "opened"
+
+    if run_quiet(["xdg-open", str(directory)]):
+        return "opened"
+
+    return None

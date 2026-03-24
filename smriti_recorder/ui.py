@@ -273,6 +273,8 @@ else:
             icon_kind: str | None = None,
             enabled: bool | None = None,
             active: bool | None = None,
+            accent: str | None = None,
+            variant: str | None = None,
         ) -> None:
             if label is not None:
                 self.label = label
@@ -282,6 +284,10 @@ else:
                 self.enabled = enabled
             if active is not None:
                 self.active = active
+            if accent is not None:
+                self.accent = accent
+            if variant is not None:
+                self.variant = variant
             self.render()
 
         def _palette(self) -> tuple[str, str, str, str]:
