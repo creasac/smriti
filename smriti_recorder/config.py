@@ -15,6 +15,7 @@ class AppConfig:
     fps: int = 30
     webcam_device: str = "/dev/video0"
     webcam_width: int = 320
+    webcam_flip_horizontal: bool = False
     webcam_window_x: int = 20
     webcam_window_y: int = 20
     webcam_always_on_top: bool = True
@@ -26,6 +27,7 @@ class ControllerState:
     status: str = "Ready."
     busy: bool = False
     webcam_enabled: bool = False
+    webcam_flipped: bool = False
     webcam_preview_running: bool = False
     mic_enabled: bool = False
     mic_available: bool = False

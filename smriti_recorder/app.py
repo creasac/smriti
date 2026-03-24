@@ -37,7 +37,9 @@ else:
             self.root = root
             self.icon_source_image: tk.PhotoImage | None = None
             self.icon_images: list[tk.PhotoImage] = []
-            self.root.title("smriti")
+            self.webcam_menu: tk.Menu | None = None
+            self.webcam_menu_bindings: list[tuple[str, str]] = []
+            self.root.title("")
             self.root.resizable(False, False)
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
             self._set_window_manager_hints()
@@ -120,8 +122,8 @@ else:
             self.controls_card = tk.Frame(
                 self.root,
                 bg=theme["control_panel_bg"],
-                padx=12,
-                pady=12,
+                padx=10,
+                pady=10,
                 highlightthickness=1,
                 highlightbackground=theme["control_panel_outline"],
             )
@@ -135,13 +137,15 @@ else:
                 label="",
                 icon_kind="webcam",
                 command=self.on_toggle_webcam,
+                secondary_command=self.on_show_webcam_menu,
                 accent=theme["accent_toggle"],
                 background=theme["control_panel_bg"],
                 variant="toggle",
-                width=78,
-                height=72,
+                width=74,
+                height=68,
             )
-            self.webcam_button.pack(side="left", padx=(0, 8))
+            self.webcam_button.pack(side="left", padx=(0, 6))
+            self.webcam_menu = tk.Menu(self.root, tearoff=False)
 
             self.mic_button = IconControl(
                 self.controls_row,
@@ -151,18 +155,18 @@ else:
                 accent=theme["accent_toggle"],
                 background=theme["control_panel_bg"],
                 variant="toggle",
-                width=78,
-                height=72,
+                width=74,
+                height=68,
             )
-            self.mic_button.pack(side="left", padx=(0, 12))
+            self.mic_button.pack(side="left", padx=(0, 10))
 
             self.controls_divider = tk.Frame(
                 self.controls_row,
                 width=1,
-                height=44,
+                height=40,
                 bg=theme["control_panel_outline"],
             )
-            self.controls_divider.pack(side="left", padx=(0, 12), pady=14)
+            self.controls_divider.pack(side="left", padx=(0, 10), pady=12)
 
             self.start_button = IconControl(
                 self.controls_row,
@@ -172,8 +176,8 @@ else:
                 accent=theme["accent_record"],
                 background=theme["control_panel_bg"],
                 variant="transport",
-                width=84,
-                height=72,
+                width=74,
+                height=68,
             )
             self.start_button.pack(side="left")
 
@@ -193,6 +197,40 @@ else:
             if not self.state or self.state.busy:
                 return
             self.controller.send("toggle_webcam", not self.state.webcam_enabled)
+
+        def on_show_webcam_menu(self) -> None:
+            if not self.state or self.state.busy or self.webcam_menu is None:
+                return
+            self._dismiss_webcam_menu()
+            self.webcam_menu.delete(0, "end")
+            self.webcam_menu.add_command(
+                label="Unflip Camera" if self.state.webcam_flipped else "Flip Camera",
+                command=self.on_toggle_webcam_flip,
+            )
+            self.webcam_menu.post(self.root.winfo_pointerx(), self.root.winfo_pointery())
+            self._bind_webcam_menu_dismiss()
+
+        def on_toggle_webcam_flip(self) -> None:
+            if not self.state or self.state.busy:
+                return
+            self._dismiss_webcam_menu()
+            self.controller.send("toggle_webcam_flip", not self.state.webcam_flipped)
+
+        def _bind_webcam_menu_dismiss(self) -> None:
+            for sequence in ("<ButtonPress-1>", "<ButtonPress-2>", "<ButtonPress-3>", "<Escape>", "<FocusOut>"):
+                funcid = self.root.bind(sequence, self._dismiss_webcam_menu, add="+")
+                if funcid:
+                    self.webcam_menu_bindings.append((sequence, funcid))
+
+        def _dismiss_webcam_menu(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+            if self.webcam_menu is not None:
+                try:
+                    self.webcam_menu.unpost()
+                except tk.TclError:
+                    pass
+            for sequence, funcid in self.webcam_menu_bindings:
+                self.root.unbind(sequence, funcid)
+            self.webcam_menu_bindings.clear()
 
         def on_toggle_mic(self) -> None:
             if not self.state or self.state.busy:

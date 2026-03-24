@@ -30,7 +30,13 @@ class WebcamWindowController:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.process: subprocess.Popen[str] | None = None
-        self.title = "smriti - webcam"
+        self.title = ""
+
+    def _video_filter(self) -> str:
+        filters = [f"scale={self.config.webcam_width}:-1"]
+        if self.config.webcam_flip_horizontal:
+            filters.insert(0, "hflip")
+        return ",".join(filters)
 
     def _build_command(self) -> list[str]:
         command = [
@@ -50,7 +56,7 @@ class WebcamWindowController:
             "-top",
             str(self.config.webcam_window_y),
             "-vf",
-            f"scale={self.config.webcam_width}:-1",
+            self._video_filter(),
             "-f",
             "v4l2",
             "-framerate",
@@ -168,15 +174,15 @@ def build_segment_command(
         mic_index = input_index
         input_index += 1
 
-    command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
-    silence_index = input_index
-
     audio_inputs: list[str] = []
     if desktop_index is not None:
         audio_inputs.append(f"[{desktop_index}:a]")
     if mic_index is not None:
         audio_inputs.append(f"[{mic_index}:a]")
-    audio_inputs.append(f"[{silence_index}:a]")
+
+    if not audio_inputs:
+        command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
+        audio_inputs.append(f"[{input_index}:a]")
 
     if len(audio_inputs) == 1:
         audio_filter = (
@@ -186,7 +192,7 @@ def build_segment_command(
     else:
         audio_filter = (
             "".join(audio_inputs)
-            + f"amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=0,"
+            + f"amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=0:normalize=0,"
             "aresample=async=1:first_pts=0,"
             "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]"
         )
@@ -246,6 +252,7 @@ class RecorderController:
         self.state.ffmpeg_available = shutil.which("ffmpeg") is not None
         self.state.ffplay_available = shutil.which("ffplay") is not None
         self.state.webcam_available = Path(self.config.webcam_device).exists()
+        self.state.webcam_flipped = self.config.webcam_flip_horizontal
         self.state.mic_available = pick_default_mic_source(pulse_sources) is not None
         self.state.desktop_audio_available = pick_default_desktop_source(pulse_sources) is not None
 
@@ -277,6 +284,8 @@ class RecorderController:
             try:
                 if name == "toggle_webcam":
                     self._handle_toggle_webcam(bool(payload))
+                elif name == "toggle_webcam_flip":
+                    self._handle_toggle_webcam_flip(bool(payload))
                 elif name == "toggle_mic":
                     self._handle_toggle_mic(bool(payload))
                 elif name == "start":
@@ -347,6 +356,31 @@ class RecorderController:
             self.webcam_controller.stop()
             self.state.webcam_enabled = False
             self.state.status = "Webcam preview disabled."
+        self.state.busy = False
+
+    def _handle_toggle_webcam_flip(self, enabled: bool) -> None:
+        previous = self.config.webcam_flip_horizontal
+        if previous == enabled:
+            return
+
+        self.state.busy = True
+        self.config.webcam_flip_horizontal = enabled
+        self.state.webcam_flipped = enabled
+
+        if self.state.webcam_enabled:
+            self.webcam_controller.stop()
+            try:
+                self.webcam_controller.start()
+            except Exception:
+                self.config.webcam_flip_horizontal = previous
+                self.state.webcam_flipped = previous
+                try:
+                    self.webcam_controller.start()
+                except Exception:
+                    self.state.webcam_enabled = False
+                raise
+
+        self.state.status = "Webcam flipped." if enabled else "Webcam flip disabled."
         self.state.busy = False
 
     def _handle_toggle_mic(self, enabled: bool) -> None:

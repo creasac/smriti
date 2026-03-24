@@ -182,6 +182,7 @@ else:
             label: str,
             icon_kind: str,
             command: Callable[[], None] | None,
+            secondary_command: Callable[[], None] | None = None,
             accent: str,
             background: str,
             variant: str = "toggle",
@@ -190,6 +191,7 @@ else:
         ) -> None:
             super().__init__(master, bg=background)
             self.command = command
+            self.secondary_command = secondary_command
             self.accent = accent
             self.background = background
             self.variant = variant
@@ -220,6 +222,7 @@ else:
                 ("<Leave>", self._on_leave),
                 ("<ButtonPress-1>", self._on_press),
                 ("<ButtonRelease-1>", self._on_release),
+                ("<ButtonRelease-3>", self._on_secondary_release),
             ):
                 self.canvas.bind(sequence, handler)
 
@@ -250,6 +253,18 @@ else:
             self.render()
             if should_fire:
                 self.command()
+
+        def _on_secondary_release(self, event: tk.Event[tk.Misc]) -> None:
+            should_fire = (
+                self.enabled
+                and self.secondary_command is not None
+                and 0 <= event.x <= self.width
+                and 0 <= event.y <= self.height
+            )
+            self.pressed = False
+            self.render()
+            if should_fire:
+                self.secondary_command()
 
         def set_visual_state(
             self,
@@ -530,7 +545,7 @@ else:
         def render(self) -> None:
             fill, outline, icon_color, label_color = self._palette()
             self.canvas.delete("all")
-            radius = 22 if self.variant == "transport" else 18
+            radius = 18
             draw_rounded_rectangle(
                 self.canvas,
                 1,
@@ -545,7 +560,7 @@ else:
             icon_only = not self.label
             icon_y = self.height / 2 if icon_only else (26 if self.variant == "transport" else 25)
             if icon_only:
-                icon_size = 34 if self.variant == "transport" else 30
+                icon_size = 29
             else:
                 icon_size = 30 if self.variant == "transport" else 28
             self._draw_icon(self.width / 2, icon_y, icon_size, icon_color)
