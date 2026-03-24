@@ -115,30 +115,17 @@ else:
 
         def _build_ui(self) -> None:
             theme = UI_THEME
-            self.root.configure(bg=theme["window_bg"])
-
-            self.shell = tk.Frame(self.root, bg=theme["window_bg"], padx=14, pady=14)
-            self.shell.pack(fill="both", expand=True)
-
-            self.panel = tk.Frame(
-                self.shell,
-                bg=theme["panel_bg"],
-                padx=14,
-                pady=14,
-                highlightthickness=1,
-                highlightbackground=theme["outline"],
-            )
-            self.panel.pack(fill="both", expand=True)
+            self.root.configure(bg=theme["control_panel_bg"])
 
             self.controls_card = tk.Frame(
-                self.panel,
+                self.root,
                 bg=theme["control_panel_bg"],
                 padx=12,
                 pady=12,
                 highlightthickness=1,
                 highlightbackground=theme["control_panel_outline"],
             )
-            self.controls_card.pack(fill="x")
+            self.controls_card.pack()
 
             self.controls_row = tk.Frame(self.controls_card, bg=theme["control_panel_bg"])
             self.controls_row.pack()
@@ -191,14 +178,14 @@ else:
             self.start_button.pack(side="left")
 
             self.output_label = tk.Label(
-                self.panel,
+                self.root,
                 text="",
                 anchor="w",
                 justify="left",
                 font=("TkFixedFont", 9),
-                bg=theme["panel_bg"],
-                fg=theme["text_secondary"],
-                wraplength=420,
+                bg=theme["control_panel_bg"],
+                fg=theme["control_text"],
+                wraplength=280,
             )
             self.output_visible = False
 
