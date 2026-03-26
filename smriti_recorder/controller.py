@@ -176,10 +176,14 @@ def build_segment_command(
         input_index += 1
 
     audio_inputs: list[str] = []
+    audio_filter_prefix = ""
+
     if desktop_index is not None:
         audio_inputs.append(f"[{desktop_index}:a]")
+
     if mic_index is not None:
-        audio_inputs.append(f"[{mic_index}:a]")
+        audio_filter_prefix += f"[{mic_index}:a]afftdn[mic_dn];"
+        audio_inputs.append("[mic_dn]")
 
     if not audio_inputs:
         command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
@@ -187,13 +191,17 @@ def build_segment_command(
 
     if len(audio_inputs) == 1:
         audio_filter = (
-            f"{audio_inputs[0]}aformat=sample_fmts=fltp:sample_rates=48000:"
+            audio_filter_prefix
+            + f"{audio_inputs[0]}volume=2.0,"
+            "aformat=sample_fmts=fltp:sample_rates=48000:"
             "channel_layouts=stereo[aout]"
         )
     else:
         audio_filter = (
-            "".join(audio_inputs)
+            audio_filter_prefix
+            + "".join(audio_inputs)
             + f"amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=0:normalize=0,"
+            "volume=2.0,"
             "aresample=async=1:first_pts=0,"
             "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]"
         )
