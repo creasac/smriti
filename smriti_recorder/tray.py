@@ -20,7 +20,7 @@ except (ImportError, ValueError):  # pragma: no cover - depends on local system 
 
 from .config import APP_NAME, AppConfig, ControllerState
 from .controller import RecorderController
-from .desktop import ensure_runtime_desktop_entry, find_app_icon_path
+from .desktop import ensure_runtime_desktop_entry, find_app_icon_path, find_asset_path
 
 
 def tray_backend_available() -> bool:
@@ -66,7 +66,21 @@ else:
                 APP_NAME + "_timer",
                 AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
             )
-            self.timer_indicator.set_icon_full(self.transparent_icon_path, "Timer")
+            stop_path = find_asset_path("stop.png")
+            self.stop_icon_path = self.transparent_icon_path
+            if stop_path:
+                self.stop_icon_path = str(stop_path)
+                try:
+                    from PIL import Image
+                    with Image.open(stop_path) as img:
+                        bbox = img.convert("RGBA").getchannel("A").getbbox()
+                        if bbox:
+                            temp_stop = os.path.join(tempfile.gettempdir(), f"{APP_NAME}_stop_maxed.png")
+                            img.crop(bbox).save(temp_stop)
+                            self.stop_icon_path = temp_stop
+                except Exception:
+                    pass
+            self.timer_indicator.set_icon_full(self.stop_icon_path, "Stop")
             self.timer_indicator.set_status(AppIndicator3.IndicatorStatus.PASSIVE)
             self.timer_indicator.set_ordering_index(1)
 
@@ -99,7 +113,9 @@ else:
 
             self.menu.show_all()
             self.indicator.set_menu(self.menu)
+            
             self.timer_indicator.set_menu(self.menu)
+            self.timer_indicator.set_secondary_activate_target(self.transport_item)
 
             self._apply_state(self.controller.state.__dict__)
             GLib.timeout_add(self.POLL_INTERVAL_MS, self._poll_events)
