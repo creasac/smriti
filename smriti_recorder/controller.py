@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import ActiveSegment, AppConfig, ControllerState, RecordingSession
@@ -61,7 +61,7 @@ class WebcamWindowController:
             "-f",
             "v4l2",
             "-framerate",
-            str(self.config.fps),
+            str(self.config.webcam_fps),
             "-i",
             self.config.webcam_device,
         ]
@@ -117,6 +117,13 @@ class WebcamWindowController:
         self.process = None
 
 
+@dataclass
+class FinalizeJob:
+    thread: threading.Thread
+    saved_path: Path | None = None
+    error: str | None = None
+
+
 def resolve_audio_sources(mic_enabled: bool) -> tuple[str | None, str | None, list[str]]:
     sources = get_pulse_sources()
     warnings: list[str] = []
@@ -139,6 +146,8 @@ def build_segment_command(
     output_path: Path,
     mic_enabled: bool,
 ) -> tuple[list[str], list[str]]:
+    audio_sample_rate = "48000"
+    audio_channel_layout = "stereo"
     command: list[str] = [
         "ffmpeg",
         "-hide_banner",
@@ -163,48 +172,53 @@ def build_segment_command(
     desktop_source, mic_source, warnings = resolve_audio_sources(mic_enabled)
 
     input_index = 1
-    desktop_index: int | None = None
     if desktop_source:
         command.extend(["-thread_queue_size", "1024", "-f", "pulse", "-i", desktop_source])
-        desktop_index = input_index
-        input_index += 1
+    else:
+        command.extend(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                f"anullsrc=channel_layout={audio_channel_layout}:sample_rate={audio_sample_rate}",
+            ]
+        )
+    desktop_index = input_index
+    input_index += 1
 
-    mic_index: int | None = None
     if mic_source:
         command.extend(["-thread_queue_size", "1024", "-f", "pulse", "-i", mic_source])
-        mic_index = input_index
-        input_index += 1
-
-    audio_inputs: list[str] = []
-    audio_filter_prefix = ""
-
-    if desktop_index is not None:
-        audio_inputs.append(f"[{desktop_index}:a]")
-
-    if mic_index is not None:
-        audio_filter_prefix += f"[{mic_index}:a]afftdn[mic_dn];"
-        audio_inputs.append("[mic_dn]")
-
-    if not audio_inputs:
-        command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
-        audio_inputs.append(f"[{input_index}:a]")
-
-    if len(audio_inputs) == 1:
-        audio_filter = (
-            audio_filter_prefix
-            + f"{audio_inputs[0]}volume=2.0,"
-            "aformat=sample_fmts=fltp:sample_rates=48000:"
-            "channel_layouts=stereo[aout]"
-        )
     else:
-        audio_filter = (
-            audio_filter_prefix
-            + "".join(audio_inputs)
-            + f"amix=inputs={len(audio_inputs)}:duration=longest:dropout_transition=0:normalize=0,"
-            "volume=2.0,"
-            "aresample=async=1:first_pts=0,"
-            "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]"
+        command.extend(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                f"anullsrc=channel_layout={audio_channel_layout}:sample_rate={audio_sample_rate}",
+            ]
         )
+    mic_index = input_index
+    input_index += 1
+
+    audio_format = (
+        f"aformat=sample_fmts=fltp:sample_rates={audio_sample_rate}:"
+        f"channel_layouts={audio_channel_layout}"
+    )
+    audio_filter_parts = [
+        f"[{desktop_index}:a]{audio_format}[desktop_mix]",
+    ]
+    if mic_source:
+        audio_filter_parts.append(f"[{mic_index}:a]afftdn,{audio_format}[mic_mix]")
+    else:
+        audio_filter_parts.append(f"[{mic_index}:a]{audio_format}[mic_mix]")
+    audio_filter_parts.append(
+        "[desktop_mix][mic_mix]"
+        "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,"
+        "volume=2.0,"
+        "aresample=async=1:first_pts=0,"
+        f"{audio_format}[aout]"
+    )
+    audio_filter = ";".join(audio_filter_parts)
 
     command.extend(
         [
@@ -217,9 +231,9 @@ def build_segment_command(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            config.video_preset,
             "-crf",
-            "23",
+            str(config.video_crf),
             "-pix_fmt",
             "yuv420p",
             "-r",
@@ -227,16 +241,127 @@ def build_segment_command(
             "-c:a",
             "aac",
             "-b:a",
-            "160k",
+            config.audio_bitrate,
             "-ac",
             "2",
             "-ar",
-            "48000",
+            audio_sample_rate,
             str(output_path),
         ]
     )
 
     return command, warnings
+
+
+def run_ffmpeg_job(command: list[str]) -> subprocess.CompletedProcess[str]:
+    wrapped_command = command
+    if shutil.which("nice") is not None:
+        wrapped_command = ["nice", "-n", "10", *wrapped_command]
+    if shutil.which("ionice") is not None:
+        wrapped_command = ["ionice", "-c3", *wrapped_command]
+    return subprocess.run(
+        wrapped_command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+
+def concat_to_mp4(segment_paths: list[Path], temp_dir: Path, output_path: Path) -> str | None:
+    concat_list = temp_dir / "segments.txt"
+    concat_lines = [f"file '{quote_concat_path(segment)}'" for segment in segment_paths]
+    concat_list.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+
+    concat_proc = run_ffmpeg_job(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list),
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+    if concat_proc.returncode == 0 and has_playable_video_stream(output_path):
+        return None
+    return summarize_error("Merge failed.", concat_proc.stderr or "")
+
+
+def remux_to_mp4(input_path: Path, output_path: Path) -> str | None:
+    remux_proc = run_ffmpeg_job(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(input_path),
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+    if remux_proc.returncode == 0 and has_playable_video_stream(output_path):
+        return None
+    return summarize_error("Final remux failed.", remux_proc.stderr or "")
+
+
+def remove_file_if_present(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def finalize_recording(
+    final_output: Path,
+    temp_dir: Path,
+    segments: list[Path],
+) -> tuple[Path | None, str | None]:
+    try:
+        if not segments:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return None, None
+
+        final_output.parent.mkdir(parents=True, exist_ok=True)
+        remove_file_if_present(final_output)
+
+        if len(segments) == 1:
+            error = remux_to_mp4(segments[0], final_output)
+        else:
+            error = concat_to_mp4(segments, temp_dir, final_output)
+
+        if error:
+            remove_file_if_present(final_output)
+            return None, f"{error} Segment files were kept in {temp_dir}."
+
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return final_output, None
+    except Exception as err:
+        remove_file_if_present(final_output)
+        return None, f"{err} Segment files were kept in {temp_dir}."
 
 
 class RecorderController:
@@ -255,7 +380,9 @@ class RecorderController:
         self.webcam_controller = WebcamWindowController(config)
         self.session: RecordingSession | None = None
         self.active_segment: ActiveSegment | None = None
+        self.finalize_job: FinalizeJob | None = None
         self.stop_requested = False
+        self.shutdown_pending = False
         self._refresh_capabilities()
         self._publish_state()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -348,10 +475,29 @@ class RecorderController:
                 self.session = None
             state_changed = True
 
+        if self.finalize_job and not self.finalize_job.thread.is_alive():
+            job = self.finalize_job
+            self.finalize_job = None
+            self.state.mode = "idle"
+            self.state.current_output = ""
+            self.state.busy = False
+            if job.saved_path:
+                self.state.last_output = str(job.saved_path)
+                self.state.status = "Saved recording."
+                if not self.shutdown_pending:
+                    self._reveal_saved_recording(job.saved_path)
+            else:
+                self.state.status = job.error or "Nothing was saved."
+            if self.shutdown_pending:
+                self.stop_requested = True
+            state_changed = True
+
         if state_changed:
             self._publish_state()
 
     def _handle_toggle_webcam(self, enabled: bool) -> None:
+        if self.finalize_job is not None or self.state.mode == "finalizing" or self.shutdown_pending:
+            return
         self.state.busy = True
         self._refresh_capabilities()
         if enabled:
@@ -375,6 +521,8 @@ class RecorderController:
         self.state.busy = False
 
     def _handle_toggle_webcam_flip(self, enabled: bool) -> None:
+        if self.finalize_job is not None or self.state.mode == "finalizing" or self.shutdown_pending:
+            return
         previous = self.config.webcam_flip_horizontal
         if previous == enabled:
             return
@@ -400,6 +548,8 @@ class RecorderController:
         self.state.busy = False
 
     def _handle_toggle_mic(self, enabled: bool) -> None:
+        if self.finalize_job is not None or self.state.mode == "finalizing" or self.shutdown_pending:
+            return
         self.state.busy = True
         self._refresh_capabilities()
         if enabled and not self.state.mic_available:
@@ -425,6 +575,9 @@ class RecorderController:
         self.state.busy = False
 
     def _handle_start(self) -> None:
+        if self.finalize_job is not None or self.state.mode == "finalizing" or self.shutdown_pending:
+            self.state.status = "Wait for the current recording to finish saving."
+            return
         if not self.state.ffmpeg_available:
             self.state.status = "ffmpeg is required but not installed or not in PATH."
             return
@@ -458,58 +611,57 @@ class RecorderController:
         self.state.busy = False
 
     def _handle_stop(self) -> None:
+        if self.finalize_job is not None:
+            self.state.status = "Still saving the previous recording."
+            return
+
         if self.session is None and self.active_segment is None:
             self.state.mode = "idle"
             self.state.status = "Ready."
             return
 
         self.state.busy = True
-        self.state.status = "Finalizing recording..."
-        saved_path: Path | None = None
-        reveal_result: str | None = None
-        try:
-            if self.state.mode == "recording":
-                self._stop_current_segment()
-            saved_path = self._finalize_session()
-            if saved_path:
-                reveal_result = reveal_in_file_manager(saved_path)
-        finally:
-            self.state.mode = "idle"
-            self.state.current_output = ""
-            self.state.busy = False
-
-        self.state.last_output = str(saved_path) if saved_path else self.state.last_output
-        if saved_path:
-            if reveal_result == "selected":
-                self.state.status = "Saved recording and selected it in your file manager."
-            elif reveal_result == "opened":
-                self.state.status = "Saved recording and opened its folder."
-            else:
-                self.state.status = "Saved recording, but couldn't open its folder."
-        else:
-            self.state.status = "Nothing was saved."
+        self.state.status = "Stopping capture..."
+        if self.state.mode == "recording":
+            self._stop_current_segment()
+        if self._start_finalize_job():
+            self.state.mode = "finalizing"
+            self.state.status = "Saving recording..."
+            return
+        self.state.mode = "idle"
+        self.state.current_output = ""
+        self.state.busy = False
+        self.state.status = "Nothing was saved."
 
     def _handle_shutdown(self) -> None:
         self.state.busy = True
+        self.shutdown_pending = True
+        self.webcam_controller.stop()
+        self.state.webcam_enabled = False
         try:
             if self.state.mode == "recording":
                 self._stop_current_segment()
-            if self.session is not None:
-                saved_path = self._finalize_session()
-                if saved_path:
-                    self.state.last_output = str(saved_path)
-        finally:
-            self.webcam_controller.stop()
-            self.state.webcam_enabled = False
+            if self.finalize_job is not None:
+                self.state.mode = "finalizing"
+                self.state.status = "Saving recording before quitting..."
+                return
+            if self._start_finalize_job():
+                self.state.mode = "finalizing"
+                self.state.status = "Saving recording before quitting..."
+                return
+            self.stop_requested = True
             self.state.mode = "idle"
             self.state.current_output = ""
             self.state.busy = False
-            self.stop_requested = True
+        finally:
+            if self.stop_requested:
+                self.state.current_output = ""
+                self.state.busy = False
 
     def _start_segment(self) -> None:
         assert self.session is not None
 
-        segment_path = self.session.temp_dir / f"segment-{len(self.session.segments) + 1:04d}.mp4"
+        segment_path = self.session.temp_dir / f"segment-{len(self.session.segments) + 1:04d}.mkv"
         command, warnings = build_segment_command(
             config=self.config,
             output_path=segment_path,
@@ -588,118 +740,34 @@ class RecorderController:
             return False, summarize_error("Discarded an incomplete segment.", stderr_output)
         return False, summarize_error("Recorder stopped without producing a playable segment.", stderr_output)
 
-    def _finalize_session(self) -> Path | None:
+    def _start_finalize_job(self) -> bool:
         if self.session is None:
-            return None
+            return False
 
-        success = False
-        result: Path | None = None
+        final_output = self.session.final_output
         temp_dir = self.session.temp_dir
-        try:
-            if not self.session.segments:
-                self._clear_session_files(keep_segments=False)
-                return None
+        segments = list(self.session.segments)
+        self.session = None
 
-            self.session.final_output.parent.mkdir(parents=True, exist_ok=True)
-            if len(self.session.segments) == 1:
-                shutil.move(str(self.session.segments[0]), str(self.session.final_output))
-                result = self.session.final_output
-                success = True
-                return result
+        if not segments:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
 
-            concat_list = self.session.temp_dir / "segments.txt"
-            concat_lines = [
-                f"file '{quote_concat_path(segment)}'" for segment in self.session.segments
-            ]
-            concat_list.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+        job = FinalizeJob(thread=threading.Thread(target=lambda: None, daemon=True))
 
-            merged_copy = self.session.temp_dir / "merged-copy.mp4"
-            copy_proc = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(concat_list),
-                    "-c",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    str(merged_copy),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if copy_proc.returncode == 0 and has_playable_video_stream(merged_copy):
-                shutil.move(str(merged_copy), str(self.session.final_output))
-                result = self.session.final_output
-                success = True
-                return result
+        def worker() -> None:
+            saved_path, error = finalize_recording(final_output, temp_dir, segments)
+            job.saved_path = saved_path
+            job.error = error
 
-            merged_reencode = self.session.temp_dir / "merged-reencode.mp4"
-            reencode_proc = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(concat_list),
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "23",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "160k",
-                    "-ac",
-                    "2",
-                    "-ar",
-                    "48000",
-                    "-movflags",
-                    "+faststart",
-                    str(merged_reencode),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if reencode_proc.returncode == 0 and has_playable_video_stream(merged_reencode):
-                shutil.move(str(merged_reencode), str(self.session.final_output))
-                result = self.session.final_output
-                success = True
-                return result
+        job.thread = threading.Thread(target=worker, daemon=True)
+        self.finalize_job = job
+        job.thread.start()
+        return True
 
-            copy_error = summarize_error("Merge failed.", copy_proc.stderr or "")
-            reencode_error = summarize_error("Fallback merge failed.", reencode_proc.stderr or "")
-            raise RuntimeError(f"{copy_error} {reencode_error}".strip())
-        except Exception as err:
-            self.session = None
-            raise RuntimeError(f"{err} Segment files were kept in {temp_dir}.") from err
-        finally:
-            if success:
-                self._clear_session_files(keep_segments=False)
-
-        return result
+    def _reveal_saved_recording(self, path: Path) -> None:
+        threading.Thread(target=reveal_in_file_manager, args=(path,), daemon=True).start()
 
     def _clear_session_files(self, keep_segments: bool) -> None:
         if self.session is None:
