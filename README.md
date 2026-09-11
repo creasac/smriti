@@ -15,6 +15,8 @@ The webcam preview is a separate draggable window. When it is visible on the des
 `Mic`, `Camera`, and `Flip Camera` start enabled by default and can be deselected later.
 While recording, the tray indicator shows a running timer label next to the icon.
 
+<img width="160" height="160" alt="smriti_logo" src="https://github.com/user-attachments/assets/597a83c6-d2af-4fb2-8837-2dd156c8b148" />
+
 ## Requirements
 
 - Linux X11 session
