@@ -26,33 +26,27 @@ While recording, the tray indicator shows a running timer label next to the icon
 - GTK AppIndicator support (`python3-gi` + Ayatana AppIndicator) for the top-bar menu
 - Python `tkinter` for the fallback window UI
 
-## Run
-
-From the repository root:
-
-```bash
-./smriti
-```
-
-You can also run:
-
-```bash
-python3 recorder.py
-```
-
-To force the original window UI instead of the top-bar menu:
-
-```bash
-SMRITI_UI=window ./smriti
-```
-
 ## Install
 
-To install `smriti` as a real command and desktop app entry:
+Run this as your normal user:
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/creasac/smriti/master/bootstrap.sh | bash
 ```
+
+No Git installation or clone is needed. The installer downloads a source archive
+temporarily, copies the app into `~/.local/share/smriti`, and removes the download
+on exit, including on failure. The installed app has no dependency on a checkout.
+
+The installer checks dependencies before copying any app files. On Ubuntu/Debian:
+
+```bash
+sudo apt install python3 python3-tk ffmpeg pulseaudio-utils python3-gi gir1.2-ayatanaappindicator3-0.1
+```
+
+It reports missing dependencies instead of installing system packages for you.
+GTK/AppIndicator support is optional; without it, Smriti uses the Tk window UI.
+Python Pillow is optional for generating icons at multiple sizes.
 
 This installs:
 
@@ -63,25 +57,42 @@ This installs:
 - `~/.local/share/icons/hicolor/*/apps/smriti.png`
 
 The desktop entry uses the themed `smriti` icon installed into `hicolor`.
+The installer adds `~/.local/bin` to `~/.bashrc` if that PATH line is absent.
+Open a new terminal or run `source ~/.bashrc` afterward. For other shells, add
+`~/.local/bin` to your shell's PATH or use `~/.local/bin/smriti` directly.
 
-If `~/.local/bin` is not already on your `PATH`, the installer appends it to `~/.bashrc`.
+## Run
+
+Launch **smriti** from your app menu or run:
+
+```bash
+smriti
+```
+
+To use the window UI:
+
+```bash
+SMRITI_UI=window smriti
+```
+
+Developers can still run `./smriti` or `python3 recorder.py` from a source checkout.
+`./install.sh` installs that checkout independently; you can delete it afterward.
 
 ## Uninstall
 
-To remove the local user install:
-
-```bash
-./uninstall.sh
-```
-
-If you installed it first, you can also run:
+Stop any active recording and close Smriti, then run:
 
 ```bash
 smriti-uninstall
 ```
 
-This removes the local command, desktop entry, themed icons, and the installed app files under `~/.local/share/smriti/`.
-If `install.sh` added `~/.local/bin` to your `PATH`, the uninstaller removes that exact block from `~/.bashrc`.
+You can also use `~/.local/bin/smriti-uninstall`, or `./uninstall.sh` from an
+optional checkout. This removes both commands, desktop entries, themed icons,
+and the installed app files. If the installer added a PATH block to `~/.bashrc`,
+uninstall removes that exact block, including after a repeated installation.
+
+**Your recordings in `~/Videos/smriti/` are always preserved.** System packages
+and recovery segments from failed recordings are left in place.
 
 ## Recording behavior
 
