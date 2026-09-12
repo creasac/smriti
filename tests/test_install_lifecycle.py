@@ -11,7 +11,7 @@ PATH_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
 
 @unittest.skipUnless(all(shutil.which(c) for c in ('python3', 'ffmpeg', 'ffplay', 'pactl')), 'requires desktop system dependencies')
 class InstallLifecycleTests(unittest.TestCase):
-    def exercise(self, existing_path=False):
+    def exercise(self, existing_path=False, lost_marker=False):
         if subprocess.run(['python3', '-c', 'import tkinter'], capture_output=True).returncode:
             self.skipTest('requires Python tkinter')
         with tempfile.TemporaryDirectory(prefix='smriti home ') as directory:
@@ -23,8 +23,10 @@ class InstallLifecycleTests(unittest.TestCase):
             bashrc.write_text(original)
             env = dict(os.environ, HOME=str(user_dir), TMPDIR=str(temporary),
                        XDG_CONFIG_HOME=str(user_dir / '.config'), XDG_DATA_HOME=str(user_dir / '.local/share'))
-            for _ in range(2):
+            for index in range(2):
                 subprocess.run(['bash', str(SOURCE / 'install.sh')], env=env, check=True, capture_output=True)
+                if lost_marker and index == 0:
+                    (user_dir / '.local/share/smriti/.path_modified').unlink()
             app = user_dir / '.local/share/smriti'
             self.assertEqual((app / '.path_modified').exists(), not existing_path)
             recordings = user_dir / 'Videos/smriti'
@@ -54,6 +56,9 @@ class InstallLifecycleTests(unittest.TestCase):
 
     def test_reinstall_then_uninstall_removes_owned_path_block(self):
         self.exercise()
+
+    def test_repairs_ownership_marker_lost_by_legacy_reinstall(self):
+        self.exercise(lost_marker=True)
 
     def test_uninstall_preserves_user_path_configuration(self):
         self.exercise(existing_path=True)

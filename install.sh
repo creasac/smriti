@@ -103,7 +103,22 @@ if ! grep -Fqx "${PATH_LINE}" "${BASHRC}"; then
     touch "${PATH_MARKER}"
     PATH_UPDATED=1
 else
-    # Preserve ownership of the PATH block across repeated installations.
+    # Older installers lost this marker on reinstall. Recover ownership only
+    # for our exact comment + PATH block, never for a user's own PATH line.
+    if python3 - "$BASHRC" "$PATH_LINE" <<'PY_PATH'
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+owned = any(
+    first == "# Added by smriti installer" and second == sys.argv[2]
+    for first, second in zip(lines, lines[1:])
+)
+raise SystemExit(0 if owned else 1)
+PY_PATH
+    then
+        touch "$PATH_MARKER"
+    fi
     PATH_UPDATED=0
 fi
 
