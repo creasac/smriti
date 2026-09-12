@@ -52,10 +52,35 @@ remove_icon_files() {
     done
 }
 
+if [[ $# -gt 0 ]]; then
+    if [[ $# -eq 1 && ( "$1" == --help || "$1" == -h ) ]]; then
+        printf 'Usage: smriti-uninstall\nRemoves the application; recordings are always preserved.\n'
+        exit 0
+    fi
+    printf 'Unknown option: %s\n' "$1" >&2
+    exit 1
+fi
+
 remove_path_block
 
+# Remove only known, user-owned UI scratch files, never recovery recordings.
+python3 - <<'PY_CLEANUP'
+import os
+from pathlib import Path
+import tempfile
+
+for directory in {Path("/tmp"), Path(tempfile.gettempdir())}:
+    for name in ("smriti_env.log", "smriti_transparent.svg", "smriti_stop_maxed.png"):
+        path = directory / name
+        try:
+            if path.lstat().st_uid == os.getuid():
+                path.unlink()
+        except FileNotFoundError:
+            pass
+PY_CLEANUP
+
 rm -f "${BIN_DIR}/smriti" "${BIN_DIR}/smriti-uninstall"
-rm -f "${APPLICATIONS_DIR}/smriti.desktop"
+rm -f "${APPLICATIONS_DIR}/smriti.desktop" "${APPLICATIONS_DIR}/smriti-local.desktop"
 remove_icon_files
 rm -rf "${INSTALL_DIR}"
 
@@ -67,4 +92,4 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "${ICON_THEME_DIR}" >/dev/null 2>&1 || true
 fi
 
-printf "Removed smriti from your local user install.\n"
+printf "Removed smriti from your local user install. Recordings in ~/Videos/smriti were preserved.\n"
